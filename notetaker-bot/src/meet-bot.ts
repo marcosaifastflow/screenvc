@@ -1,7 +1,5 @@
 import puppeteer, { type Browser, type Page } from 'puppeteer';
-import path from 'path';
 
-const EXTENSION_PATH = path.resolve(__dirname, '..', 'extension');
 const ADMIT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -21,72 +19,170 @@ export async function joinMeet(
       '--disable-gpu',
       '--disable-dev-shm-usage',
       '--autoplay-policy=no-user-gesture-required',
+      '--window-size=1280,720',
     ],
   });
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
 
+  // Set a realistic user agent so Google Meet doesn't block us
+  await page.setUserAgent(
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  );
+
   console.log(`[MEET] Navigating to ${meetLink}`);
-  await page.goto(meetLink, { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.goto(meetLink, { waitUntil: 'networkidle2', timeout: 60000 });
+
+  // Log the page title and URL for debugging
+  const pageTitle = await page.title();
+  const pageUrl = page.url();
+  console.log(`[MEET] Page loaded - Title: "${pageTitle}", URL: ${pageUrl}`);
 
   // Wait for the page to settle
-  await delay(3000);
+  await delay(5000);
 
-  // Try to dismiss the "Got it" / cookie consent buttons
+  // Log what's on the page for debugging
+  const pageDebug = await page.evaluate(() => {
+    const allButtons = Array.from(document.querySelectorAll('button'));
+    const allInputs = Array.from(document.querySelectorAll('input'));
+    const allLinks = Array.from(document.querySelectorAll('a'));
+    const bodyText = document.body.innerText.substring(0, 1000);
+    return {
+      buttons: allButtons.map((b) => ({
+        text: b.textContent?.trim().substring(0, 50),
+        ariaLabel: b.getAttribute('aria-label'),
+        dataIsMuted: b.getAttribute('data-is-muted'),
+      })),
+      inputs: allInputs.map((i) => ({
+        type: i.type,
+        ariaLabel: i.getAttribute('aria-label'),
+        placeholder: i.placeholder,
+        name: i.name,
+      })),
+      linkCount: allLinks.length,
+      bodyText,
+    };
+  });
+  console.log('[MEET] Page debug:', JSON.stringify(pageDebug, null, 2));
+
+  // Try to dismiss cookie consent / "Got it" buttons
   try {
-    const gotItButton = await page.$('button[aria-label="Got it"]');
-    if (gotItButton) await gotItButton.click();
+    await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (const btn of buttons) {
+        const text = btn.textContent?.trim().toLowerCase() || '';
+        if (
+          text === 'got it' ||
+          text === 'accept all' ||
+          text === 'i agree' ||
+          text === 'dismiss'
+        ) {
+          btn.click();
+        }
+      }
+    });
+    await delay(1000);
   } catch {}
 
-  // Turn off camera and microphone before joining
-  try {
-    // Camera toggle
-    const cameraBtn = await page.$('[data-is-muted][aria-label*="camera" i]');
-    if (cameraBtn) {
-      const isMuted = await cameraBtn.evaluate((el: Element) => el.getAttribute('data-is-muted'));
-      if (isMuted !== 'true') await cameraBtn.click();
+  // Enter bot name - try multiple possible selectors
+  console.log('[MEET] Looking for name input...');
+  const nameEntered = await page.evaluate((name: string) => {
+    // Try various selectors for the name input
+    const selectors = [
+      'input[aria-label="Your name"]',
+      'input[aria-label="Your Name"]',
+      'input[placeholder*="name" i]',
+      'input[type="text"]',
+    ];
+    for (const selector of selectors) {
+      const input = document.querySelector(selector) as HTMLInputElement;
+      if (input) {
+        input.value = '';
+        input.focus();
+        // Use native input setter to trigger React/Angular change detection
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )?.set;
+        if (nativeInputValueSetter) {
+          nativeInputValueSetter.call(input, name);
+        } else {
+          input.value = name;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return { found: true, selector };
+      }
+    }
+    return { found: false, selector: null };
+  }, botName);
+  console.log('[MEET] Name input result:', JSON.stringify(nameEntered));
+
+  // Wait a moment after entering name
+  await delay(2000);
+
+  // Click join button - try multiple strategies
+  console.log('[MEET] Looking for join button...');
+  const joinResult = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const joinTexts = [
+      'ask to join',
+      'join now',
+      'join meeting',
+      'join',
+      'request to join',
+    ];
+
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim().toLowerCase();
+      const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const jsName = (btn.getAttribute('jsname') || '').toLowerCase();
+
+      for (const joinText of joinTexts) {
+        if (text.includes(joinText) || ariaLabel.includes(joinText)) {
+          (btn as HTMLElement).click();
+          return { clicked: true, text: text.substring(0, 50), method: 'text-match' };
+        }
+      }
+
+      // Google Meet sometimes uses data-mdc attributes or specific jsnames
+      if (jsName === 'wg1ovc' || jsName === 'a4fub') {
+        (btn as HTMLElement).click();
+        return { clicked: true, text: text.substring(0, 50), method: 'jsname-match' };
+      }
     }
 
-    // Mic toggle
-    const micBtn = await page.$('[data-is-muted][aria-label*="microphone" i]');
-    if (micBtn) {
-      const isMuted = await micBtn.evaluate((el: Element) => el.getAttribute('data-is-muted'));
-      if (isMuted !== 'true') await micBtn.click();
-    }
-  } catch {}
+    // Last resort: look for any prominent button that could be "join"
+    const allBtns = Array.from(document.querySelectorAll('button'));
+    const prominentBtn = allBtns.find((b) => {
+      const style = window.getComputedStyle(b);
+      const text = (b.textContent || '').trim().toLowerCase();
+      // Look for a button that contains "join" anywhere or is a primary-looking button
+      return (
+        text.includes('join') ||
+        (style.backgroundColor && text.length > 0 && text.length < 20)
+      );
+    });
 
-  // Enter bot name
-  try {
-    const nameInput = await page.$('input[aria-label="Your name"]');
-    if (nameInput) {
-      await nameInput.click({ clickCount: 3 });
-      await nameInput.type(botName, { delay: 50 });
+    if (prominentBtn) {
+      prominentBtn.click();
+      return {
+        clicked: true,
+        text: (prominentBtn.textContent || '').trim().substring(0, 50),
+        method: 'prominent-btn',
+      };
     }
-  } catch (err) {
-    console.warn('[MEET] Could not set bot name:', err);
-  }
 
-  // Click "Ask to join" or "Join now" button
-  console.log('[MEET] Clicking join button...');
-  await delay(1000);
-
-  const joinClicked = await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const joinBtn = buttons.find(
-      (b: HTMLButtonElement) =>
-        b.textContent?.includes('Ask to join') ||
-        b.textContent?.includes('Join now') ||
-        b.textContent?.includes('Join'),
-    );
-    if (joinBtn) {
-      joinBtn.click();
-      return true;
-    }
-    return false;
+    return { clicked: false, text: '', method: 'none' };
   });
 
-  if (!joinClicked) {
+  console.log('[MEET] Join button result:', JSON.stringify(joinResult));
+
+  if (!joinResult.clicked) {
+    // Take a screenshot for debugging before failing
+    const pageContent = await page.content();
+    console.log('[MEET] Page HTML (first 2000 chars):', pageContent.substring(0, 2000));
     throw new Error('Could not find join button on Google Meet page');
   }
 
@@ -102,35 +198,44 @@ async function waitForAdmission(page: Page): Promise<void> {
   const startTime = Date.now();
 
   while (Date.now() - startTime < ADMIT_TIMEOUT_MS) {
-    // Check if we're in the meeting (participant list or meeting controls visible)
-    const inMeeting = await page.evaluate(() => {
-      // Meeting toolbar/controls appear when in the meeting
+    const status = await page.evaluate(() => {
+      const body = document.body.innerText;
+
+      // Check if denied
+      if (
+        body.includes("You can't join this video call") ||
+        body.includes('The meeting host denied your request') ||
+        body.includes('removed you from the meeting') ||
+        body.includes('This meeting has ended') ||
+        body.includes('Meeting not found')
+      ) {
+        return 'denied';
+      }
+
+      // Check if in meeting
       const controls = document.querySelector('[data-call-controls]');
-      // Or check for the leave button
       const leaveBtn = Array.from(document.querySelectorAll('button')).find(
         (b: HTMLButtonElement) =>
           b.getAttribute('aria-label')?.toLowerCase().includes('leave') ||
-          b.textContent?.includes('Leave'),
+          b.textContent?.toLowerCase().includes('leave call'),
       );
-      // Or check for participant count
       const participantInfo = document.querySelector('[data-participant-id]');
+      // Check for the bottom toolbar that appears when in a call
+      const toolbar = document.querySelector('[jscontroller][jsaction*="leave"]');
 
-      return !!(controls || leaveBtn || participantInfo);
+      if (controls || leaveBtn || participantInfo || toolbar) {
+        return 'joined';
+      }
+
+      return 'waiting';
     });
 
-    if (inMeeting) return;
+    if (status === 'joined') {
+      console.log('[MEET] Admission confirmed - now in meeting');
+      return;
+    }
 
-    // Check if we got denied
-    const denied = await page.evaluate(() => {
-      const body = document.body.innerText;
-      return (
-        body.includes('You can\'t join this video call') ||
-        body.includes('The meeting host denied your request') ||
-        body.includes('removed you from the meeting')
-      );
-    });
-
-    if (denied) {
+    if (status === 'denied') {
       throw new Error('Host denied admission to the meeting');
     }
 
