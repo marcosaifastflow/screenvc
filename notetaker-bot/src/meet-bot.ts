@@ -197,20 +197,38 @@ export async function joinMeet(
 
 async function waitForAdmission(page: Page): Promise<void> {
   const startTime = Date.now();
+  let checkCount = 0;
 
   while (Date.now() - startTime < ADMIT_TIMEOUT_MS) {
-    const status = await page.evaluate(() => {
-      const body = document.body.innerText;
+    checkCount++;
 
-      // Check if denied
-      if (
-        body.includes("You can't join this video call") ||
-        body.includes('The meeting host denied your request') ||
-        body.includes('removed you from the meeting') ||
-        body.includes('This meeting has ended') ||
-        body.includes('Meeting not found')
-      ) {
-        return 'denied';
+    const result = await page.evaluate(() => {
+      const body = document.body.innerText;
+      const bodySnippet = body.substring(0, 500);
+
+      // Check if explicitly denied by host
+      const deniedStrings = [
+        'The meeting host denied your request',
+        'removed you from the meeting',
+      ];
+      for (const s of deniedStrings) {
+        if (body.includes(s)) {
+          return { status: 'denied', reason: s, bodySnippet };
+        }
+      }
+
+      // Check if meeting is unavailable (don't fail immediately — might just be loading)
+      const unavailableStrings = [
+        "You can't join this video call",
+        'Meeting not found',
+        'This meeting has ended',
+        'Check your meeting code',
+        'Invalid meeting code',
+      ];
+      for (const s of unavailableStrings) {
+        if (body.includes(s)) {
+          return { status: 'unavailable', reason: s, bodySnippet };
+        }
       }
 
       // Check if in meeting
@@ -221,23 +239,33 @@ async function waitForAdmission(page: Page): Promise<void> {
           b.textContent?.toLowerCase().includes('leave call'),
       );
       const participantInfo = document.querySelector('[data-participant-id]');
-      // Check for the bottom toolbar that appears when in a call
       const toolbar = document.querySelector('[jscontroller][jsaction*="leave"]');
 
       if (controls || leaveBtn || participantInfo || toolbar) {
-        return 'joined';
+        return { status: 'joined', reason: '', bodySnippet };
       }
 
-      return 'waiting';
+      return { status: 'waiting', reason: '', bodySnippet };
     });
 
-    if (status === 'joined') {
+    // Log every 5th check or on status change
+    if (checkCount <= 3 || checkCount % 5 === 0) {
+      console.log(`[MEET] Check #${checkCount}: status=${result.status}, reason="${result.reason}"`);
+      console.log(`[MEET] Body snippet: ${result.bodySnippet}`);
+    }
+
+    if (result.status === 'joined') {
       console.log('[MEET] Admission confirmed - now in meeting');
       return;
     }
 
-    if (status === 'denied') {
-      throw new Error('Host denied admission to the meeting');
+    if (result.status === 'denied') {
+      throw new Error(`Host denied admission: ${result.reason}`);
+    }
+
+    // Only fail on "unavailable" after several checks (page might still be loading)
+    if (result.status === 'unavailable' && checkCount > 5) {
+      throw new Error(`Meeting unavailable: ${result.reason}`);
     }
 
     await delay(2000);
