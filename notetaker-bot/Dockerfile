@@ -29,7 +29,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 WORKDIR /app
 
 # Install all deps (including devDependencies for build)
-COPY package.json package-lock.json* ./
+COPY package.json ./
 RUN npm install
 
 # Copy source and build
@@ -43,6 +43,7 @@ RUN npm prune --omit=dev
 # Copy extension
 COPY extension/ ./extension/
 
+ENV PORT=3100
 EXPOSE 3100
 
 CMD ["node", "dist/index.js"]

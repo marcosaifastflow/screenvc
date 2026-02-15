@@ -11,14 +11,13 @@ export async function joinMeet(
   botName: string,
 ): Promise<{ browser: Browser; page: Page }> {
   const browser = await puppeteer.launch({
-    headless: false, // Required for tabCapture extension
+    headless: 'shell',
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',
-      '--disable-extensions-except=' + EXTENSION_PATH,
-      '--load-extension=' + EXTENSION_PATH,
       '--disable-gpu',
       '--disable-dev-shm-usage',
       '--autoplay-policy=no-user-gesture-required',
