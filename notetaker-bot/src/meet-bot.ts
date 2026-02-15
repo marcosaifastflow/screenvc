@@ -1,4 +1,8 @@
-import puppeteer, { type Browser, type Page } from 'puppeteer';
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { type Browser, type Page } from 'puppeteer';
+
+puppeteerExtra.use(StealthPlugin());
 
 const ADMIT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -8,8 +12,8 @@ export async function joinMeet(
   meetLink: string,
   botName: string,
 ): Promise<{ browser: Browser; page: Page }> {
-  const browser = await puppeteer.launch({
-    headless: true,
+  const browser = await puppeteerExtra.launch({
+    headless: false, // Non-headless, uses Xvfb virtual display
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
@@ -20,54 +24,55 @@ export async function joinMeet(
       '--disable-dev-shm-usage',
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=1280,720',
-      '--disable-web-security',
+      '--disable-blink-features=AutomationControlled',
     ],
-  });
+    ignoreDefaultArgs: ['--enable-automation'],
+  }) as unknown as Browser;
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
 
-  // Set a realistic user agent so Google Meet doesn't block us
+  // Set a realistic user agent
   await page.setUserAgent(
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   );
 
+  // Remove webdriver flag
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  });
+
   console.log(`[MEET] Navigating to ${meetLink}`);
   await page.goto(meetLink, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  // Log the page title and URL for debugging
+  // Wait for the page to fully render
+  await delay(8000);
+
+  // Log page state for debugging
   const pageTitle = await page.title();
   const pageUrl = page.url();
   console.log(`[MEET] Page loaded - Title: "${pageTitle}", URL: ${pageUrl}`);
 
-  // Wait for the page to settle
-  await delay(5000);
-
-  // Log what's on the page for debugging
   const pageDebug = await page.evaluate(() => {
     const allButtons = Array.from(document.querySelectorAll('button'));
     const allInputs = Array.from(document.querySelectorAll('input'));
-    const allLinks = Array.from(document.querySelectorAll('a'));
     const bodyText = document.body.innerText.substring(0, 1000);
     return {
       buttons: allButtons.map((b) => ({
         text: b.textContent?.trim().substring(0, 50),
         ariaLabel: b.getAttribute('aria-label'),
-        dataIsMuted: b.getAttribute('data-is-muted'),
       })),
       inputs: allInputs.map((i) => ({
         type: i.type,
         ariaLabel: i.getAttribute('aria-label'),
         placeholder: i.placeholder,
-        name: i.name,
       })),
-      linkCount: allLinks.length,
       bodyText,
     };
   });
   console.log('[MEET] Page debug:', JSON.stringify(pageDebug, null, 2));
 
-  // Try to dismiss cookie consent / "Got it" buttons
+  // Dismiss cookie consent / "Got it" buttons
   try {
     await page.evaluate(() => {
       const buttons = Array.from(document.querySelectorAll('button'));
@@ -86,10 +91,9 @@ export async function joinMeet(
     await delay(1000);
   } catch {}
 
-  // Enter bot name - try multiple possible selectors
+  // Enter bot name
   console.log('[MEET] Looking for name input...');
   const nameEntered = await page.evaluate((name: string) => {
-    // Try various selectors for the name input
     const selectors = [
       'input[aria-label="Your name"]',
       'input[aria-label="Your Name"]',
@@ -101,7 +105,6 @@ export async function joinMeet(
       if (input) {
         input.value = '';
         input.focus();
-        // Use native input setter to trigger React/Angular change detection
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
           window.HTMLInputElement.prototype,
           'value',
@@ -120,10 +123,9 @@ export async function joinMeet(
   }, botName);
   console.log('[MEET] Name input result:', JSON.stringify(nameEntered));
 
-  // Wait a moment after entering name
   await delay(2000);
 
-  // Click join button - try multiple strategies
+  // Click join button
   console.log('[MEET] Looking for join button...');
   const joinResult = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
@@ -138,7 +140,6 @@ export async function joinMeet(
     for (const btn of buttons) {
       const text = (btn.textContent || '').trim().toLowerCase();
       const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-      const jsName = (btn.getAttribute('jsname') || '').toLowerCase();
 
       for (const joinText of joinTexts) {
         if (text.includes(joinText) || ariaLabel.includes(joinText)) {
@@ -146,33 +147,6 @@ export async function joinMeet(
           return { clicked: true, text: text.substring(0, 50), method: 'text-match' };
         }
       }
-
-      // Google Meet sometimes uses data-mdc attributes or specific jsnames
-      if (jsName === 'wg1ovc' || jsName === 'a4fub') {
-        (btn as HTMLElement).click();
-        return { clicked: true, text: text.substring(0, 50), method: 'jsname-match' };
-      }
-    }
-
-    // Last resort: look for any prominent button that could be "join"
-    const allBtns = Array.from(document.querySelectorAll('button'));
-    const prominentBtn = allBtns.find((b) => {
-      const style = window.getComputedStyle(b);
-      const text = (b.textContent || '').trim().toLowerCase();
-      // Look for a button that contains "join" anywhere or is a primary-looking button
-      return (
-        text.includes('join') ||
-        (style.backgroundColor && text.length > 0 && text.length < 20)
-      );
-    });
-
-    if (prominentBtn) {
-      prominentBtn.click();
-      return {
-        clicked: true,
-        text: (prominentBtn.textContent || '').trim().substring(0, 50),
-        method: 'prominent-btn',
-      };
     }
 
     return { clicked: false, text: '', method: 'none' };
@@ -181,13 +155,12 @@ export async function joinMeet(
   console.log('[MEET] Join button result:', JSON.stringify(joinResult));
 
   if (!joinResult.clicked) {
-    // Take a screenshot for debugging before failing
-    const pageContent = await page.content();
-    console.log('[MEET] Page HTML (first 2000 chars):', pageContent.substring(0, 2000));
+    const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 2000));
+    console.log('[MEET] Page body when join failed:', bodyText);
     throw new Error('Could not find join button on Google Meet page');
   }
 
-  // Wait for admission (until we're in the meeting)
+  // Wait for admission
   console.log('[MEET] Waiting for host to admit...');
   await waitForAdmission(page);
   console.log('[MEET] Successfully joined the meeting');
@@ -206,7 +179,7 @@ async function waitForAdmission(page: Page): Promise<void> {
       const body = document.body.innerText;
       const bodySnippet = body.substring(0, 500);
 
-      // Check if explicitly denied by host
+      // Only fail on explicit host denial
       const deniedStrings = [
         'The meeting host denied your request',
         'removed you from the meeting',
@@ -217,11 +190,10 @@ async function waitForAdmission(page: Page): Promise<void> {
         }
       }
 
-      // Check if meeting is unavailable (don't fail immediately — might just be loading)
+      // Meeting unavailable — but give time for it to load
       const unavailableStrings = [
         "You can't join this video call",
         'Meeting not found',
-        'This meeting has ended',
         'Check your meeting code',
         'Invalid meeting code',
       ];
@@ -248,7 +220,6 @@ async function waitForAdmission(page: Page): Promise<void> {
       return { status: 'waiting', reason: '', bodySnippet };
     });
 
-    // Log every 5th check or on status change
     if (checkCount <= 3 || checkCount % 5 === 0) {
       console.log(`[MEET] Check #${checkCount}: status=${result.status}, reason="${result.reason}"`);
       console.log(`[MEET] Body snippet: ${result.bodySnippet}`);
@@ -263,8 +234,8 @@ async function waitForAdmission(page: Page): Promise<void> {
       throw new Error(`Host denied admission: ${result.reason}`);
     }
 
-    // Only fail on "unavailable" after several checks (page might still be loading)
-    if (result.status === 'unavailable' && checkCount > 5) {
+    // Only fail on "unavailable" after 10 checks (20 seconds)
+    if (result.status === 'unavailable' && checkCount > 10) {
       throw new Error(`Meeting unavailable: ${result.reason}`);
     }
 
