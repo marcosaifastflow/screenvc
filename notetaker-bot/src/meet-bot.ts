@@ -4,6 +4,8 @@ import path from 'path';
 const EXTENSION_PATH = path.resolve(__dirname, '..', 'extension');
 const ADMIT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function joinMeet(
   meetLink: string,
   botName: string,
@@ -30,7 +32,7 @@ export async function joinMeet(
   await page.goto(meetLink, { waitUntil: 'networkidle2', timeout: 30000 });
 
   // Wait for the page to settle
-  await page.waitForTimeout(3000);
+  await delay(3000);
 
   // Try to dismiss the "Got it" / cookie consent buttons
   try {
@@ -43,14 +45,14 @@ export async function joinMeet(
     // Camera toggle
     const cameraBtn = await page.$('[data-is-muted][aria-label*="camera" i]');
     if (cameraBtn) {
-      const isMuted = await cameraBtn.evaluate((el) => el.getAttribute('data-is-muted'));
+      const isMuted = await cameraBtn.evaluate((el: Element) => el.getAttribute('data-is-muted'));
       if (isMuted !== 'true') await cameraBtn.click();
     }
 
     // Mic toggle
     const micBtn = await page.$('[data-is-muted][aria-label*="microphone" i]');
     if (micBtn) {
-      const isMuted = await micBtn.evaluate((el) => el.getAttribute('data-is-muted'));
+      const isMuted = await micBtn.evaluate((el: Element) => el.getAttribute('data-is-muted'));
       if (isMuted !== 'true') await micBtn.click();
     }
   } catch {}
@@ -68,12 +70,12 @@ export async function joinMeet(
 
   // Click "Ask to join" or "Join now" button
   console.log('[MEET] Clicking join button...');
-  await page.waitForTimeout(1000);
+  await delay(1000);
 
   const joinClicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button'));
     const joinBtn = buttons.find(
-      (b) =>
+      (b: HTMLButtonElement) =>
         b.textContent?.includes('Ask to join') ||
         b.textContent?.includes('Join now') ||
         b.textContent?.includes('Join'),
@@ -107,7 +109,7 @@ async function waitForAdmission(page: Page): Promise<void> {
       const controls = document.querySelector('[data-call-controls]');
       // Or check for the leave button
       const leaveBtn = Array.from(document.querySelectorAll('button')).find(
-        (b) =>
+        (b: HTMLButtonElement) =>
           b.getAttribute('aria-label')?.toLowerCase().includes('leave') ||
           b.textContent?.includes('Leave'),
       );
@@ -133,7 +135,7 @@ async function waitForAdmission(page: Page): Promise<void> {
       throw new Error('Host denied admission to the meeting');
     }
 
-    await page.waitForTimeout(2000);
+    await delay(2000);
   }
 
   throw new Error('Timed out waiting for host to admit bot (5 minutes)');

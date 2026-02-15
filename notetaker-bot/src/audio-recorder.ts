@@ -6,6 +6,8 @@ import os from 'os';
 const MAX_DURATION_MS = 90 * 60 * 1000; // 90 minutes max
 const CHECK_INTERVAL_MS = 5000;
 
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function recordAudio(page: Page, sessionId: string): Promise<string> {
   const outputPath = path.join(os.tmpdir(), `notetaker-${sessionId}.webm`);
 
@@ -13,7 +15,7 @@ export async function recordAudio(page: Page, sessionId: string): Promise<string
   await page.evaluate(() => {
     return new Promise<void>((resolve, reject) => {
       try {
-        // Use getDisplayMedia to capture tab audio
+        // Use AudioContext to capture audio
         const audioContext = new AudioContext();
         const dest = audioContext.createMediaStreamDestination();
 
@@ -34,7 +36,7 @@ export async function recordAudio(page: Page, sessionId: string): Promise<string
         });
 
         const chunks: Blob[] = [];
-        recorder.ondataavailable = (e) => {
+        recorder.ondataavailable = (e: BlobEvent) => {
           if (e.data.size > 0) chunks.push(e.data);
         };
 
@@ -59,7 +61,7 @@ export async function recordAudio(page: Page, sessionId: string): Promise<string
   // Monitor for call end
   const startTime = Date.now();
   while (Date.now() - startTime < MAX_DURATION_MS) {
-    await page.waitForTimeout(CHECK_INTERVAL_MS);
+    await delay(CHECK_INTERVAL_MS);
 
     const callEnded = await page.evaluate(() => {
       const body = document.body.innerText;
@@ -89,7 +91,7 @@ export async function recordAudio(page: Page, sessionId: string): Promise<string
   });
 
   // Wait for blob to be ready
-  await page.waitForTimeout(1000);
+  await delay(1000);
 
   // Extract the recorded audio
   const audioBase64 = await page.evaluate(() => {
