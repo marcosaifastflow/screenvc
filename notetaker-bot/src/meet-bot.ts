@@ -9,7 +9,7 @@ export async function joinMeet(
   botName: string,
 ): Promise<{ browser: Browser; page: Page }> {
   const browser = await puppeteer.launch({
-    headless: 'shell',
+    headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
@@ -20,6 +20,7 @@ export async function joinMeet(
       '--disable-dev-shm-usage',
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=1280,720',
+      '--disable-web-security',
     ],
   });
 
@@ -32,7 +33,7 @@ export async function joinMeet(
   );
 
   console.log(`[MEET] Navigating to ${meetLink}`);
-  await page.goto(meetLink, { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto(meetLink, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
   // Log the page title and URL for debugging
   const pageTitle = await page.title();
