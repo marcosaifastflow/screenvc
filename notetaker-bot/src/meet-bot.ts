@@ -12,8 +12,9 @@ export async function joinMeet(
   meetLink: string,
   botName: string,
 ): Promise<{ browser: Browser; page: Page }> {
+  console.log('[MEET] Launching browser...');
   const browser = await puppeteerExtra.launch({
-    headless: false, // Non-headless, uses Xvfb virtual display
+    headless: 'new' as any, // New headless mode - full browser engine, no display needed
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
@@ -25,9 +26,11 @@ export async function joinMeet(
       '--autoplay-policy=no-user-gesture-required',
       '--window-size=1280,720',
       '--disable-blink-features=AutomationControlled',
+      '--single-process',
     ],
     ignoreDefaultArgs: ['--enable-automation'],
   }) as unknown as Browser;
+  console.log('[MEET] Browser launched successfully');
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
