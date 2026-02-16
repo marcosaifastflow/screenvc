@@ -29,9 +29,6 @@ export async function createRecallBot(
     body: JSON.stringify({
       meeting_url: meetLink,
       bot_name: botName,
-      transcription_options: {
-        provider: 'default',
-      },
     }),
   });
 
