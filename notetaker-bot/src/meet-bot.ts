@@ -1,6 +1,7 @@
 // Recall.ai bot management - sends a bot to join Google Meet via Recall.ai API
 
-const RECALL_API_BASE = 'https://us-west-2.recall.ai/api/v1';
+const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
+const RECALL_API_BASE = `https://${RECALL_REGION}.recall.ai/api/v1`;
 
 interface RecallBotResponse {
   id: string;
