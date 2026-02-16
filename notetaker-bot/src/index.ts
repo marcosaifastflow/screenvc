@@ -1,7 +1,5 @@
 import express from 'express';
-import { joinMeet } from './meet-bot';
-import { recordAudio } from './audio-recorder';
-import { transcribeAudio } from './transcriber';
+import { createRecallBot, getRecallBotStatus, getRecallBotTranscript } from './meet-bot';
 import { summarizeTranscript } from './summarizer';
 import { sendWebhook } from './webhook';
 
@@ -67,56 +65,111 @@ app.post('/join', (req, res) => {
   });
 });
 
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Recall.ai bot statuses that mean "still in progress"
+const ACTIVE_STATUSES = new Set([
+  'ready',
+  'joining_call',
+  'in_waiting_room',
+  'in_call_not_recording',
+  'in_call_recording',
+]);
+
+// Statuses that mean the bot is done (successfully or not)
+const TERMINAL_STATUSES = new Set([
+  'call_ended',
+  'done',
+  'fatal',
+  'analysis_done',
+]);
+
+const POLL_INTERVAL_MS = 10_000; // Poll every 10 seconds
+const MAX_POLL_DURATION_MS = 120 * 60 * 1000; // 2 hours max
+
 async function runBotPipeline(params: JoinRequest) {
-  const { callId, sessionId, meetLink, botName, callbackUrl, callbackSecret } = params;
+  const { sessionId, meetLink, botName, callbackUrl, callbackSecret } = params;
   const log = (msg: string) => console.log(`[BOT ${sessionId}] ${msg}`);
 
   try {
-    // Notify: joining
+    // Step 1: Notify — joining
     await sendWebhook(callbackUrl, callbackSecret, {
       sessionId,
       eventType: 'status_update',
       status: 'joining',
     });
 
-    log('Joining Google Meet...');
-    const { browser, page } = await joinMeet(meetLink, botName);
+    log('Creating Recall.ai bot...');
+    const { botId } = await createRecallBot(meetLink, botName);
+    log(`Recall bot created: ${botId}`);
 
-    // Notify: recording
-    await sendWebhook(callbackUrl, callbackSecret, {
-      sessionId,
-      eventType: 'status_update',
-      status: 'recording',
-    });
+    // Step 2: Poll until the bot finishes
+    let sentRecordingStatus = false;
+    const pollStart = Date.now();
 
-    log('Recording audio...');
-    const audioPath = await recordAudio(page, sessionId);
+    while (Date.now() - pollStart < MAX_POLL_DURATION_MS) {
+      await delay(POLL_INTERVAL_MS);
 
-    log('Closing browser...');
-    await browser.close();
+      const { status } = await getRecallBotStatus(botId);
+      log(`Bot status: ${status}`);
 
-    // Notify: processing
+      // Send "recording" webhook once when the bot starts recording
+      if (status === 'in_call_recording' && !sentRecordingStatus) {
+        sentRecordingStatus = true;
+        await sendWebhook(callbackUrl, callbackSecret, {
+          sessionId,
+          eventType: 'status_update',
+          status: 'recording',
+        });
+      }
+
+      if (status === 'fatal') {
+        throw new Error('Recall.ai bot encountered a fatal error');
+      }
+
+      if (TERMINAL_STATUSES.has(status)) {
+        log('Bot finished, retrieving transcript...');
+        break;
+      }
+    }
+
+    // Step 3: Notify — processing
     await sendWebhook(callbackUrl, callbackSecret, {
       sessionId,
       eventType: 'status_update',
       status: 'processing',
     });
 
-    log('Transcribing audio...');
-    const transcript = await transcribeAudio(audioPath);
+    // Step 4: Get transcript from Recall.ai
+    log('Fetching transcript from Recall.ai...');
+    const transcript = await getRecallBotTranscript(botId);
 
+    if (!transcript.fullText || transcript.fullText.trim().length === 0) {
+      throw new Error('No transcript was produced — the call may have been too short or silent.');
+    }
+
+    log(`Transcript received: ${transcript.fullText.length} chars`);
+
+    // Step 5: Summarize with GPT
     log('Generating summary...');
     const summary = await summarizeTranscript(transcript.fullText);
 
-    // Notify: completed with results
+    // Build segments with duration info
+    const durationSeconds =
+      transcript.segments.length > 0
+        ? Math.ceil(transcript.segments[transcript.segments.length - 1].end)
+        : 0;
+    const wordCount = transcript.fullText.split(/\s+/).filter(Boolean).length;
+
+    // Step 6: Notify — completed with results
     await sendWebhook(callbackUrl, callbackSecret, {
       sessionId,
       eventType: 'completed',
       transcript: {
         fullText: transcript.fullText,
         segments: transcript.segments,
-        durationSeconds: transcript.durationSeconds,
-        wordCount: transcript.wordCount,
+        durationSeconds,
+        wordCount,
       },
       summary,
     });

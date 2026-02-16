@@ -31,9 +31,6 @@ export async function createRecallBot(
       transcription_options: {
         provider: 'default',
       },
-      real_time_transcription: {
-        destination_url: '', // We'll poll instead
-      },
     }),
   });
 
@@ -51,7 +48,6 @@ export async function createRecallBot(
 
 export async function getRecallBotStatus(botId: string): Promise<{
   status: string;
-  transcript: Array<{ speaker: string; words: Array<{ text: string; start_time: number; end_time: number }> }> | null;
 }> {
   const apiKey = process.env.RECALL_API_KEY;
   if (!apiKey) throw new Error('RECALL_API_KEY is not configured');
@@ -73,48 +69,70 @@ export async function getRecallBotStatus(botId: string): Promise<{
     ? statusChanges[statusChanges.length - 1].code
     : 'unknown';
 
-  return {
-    status: latestStatus,
-    transcript: data.transcript || null,
-  };
+  return { status: latestStatus };
 }
 
-export async function getRecallBotTranscript(botId: string): Promise<{
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function getRecallBotTranscript(
+  botId: string,
+  maxRetries = 5,
+): Promise<{
   segments: Array<{ speaker: string; text: string; start: number; end: number }>;
   fullText: string;
 }> {
   const apiKey = process.env.RECALL_API_KEY;
   if (!apiKey) throw new Error('RECALL_API_KEY is not configured');
 
-  const response = await fetch(`${RECALL_API_BASE}/bot/${botId}/transcript`, {
-    headers: { 'Authorization': `Token ${apiKey}` },
-  });
+  // Recall.ai may take a moment to finalize the transcript after call_ended,
+  // so retry a few times with backoff if we get an empty result.
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const response = await fetch(`${RECALL_API_BASE}/bot/${botId}/transcript`, {
+      headers: { 'Authorization': `Token ${apiKey}` },
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Recall.ai transcript error: ${response.status} — ${errorText}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      // 404 means transcript not ready yet — retry
+      if (response.status === 404 && attempt < maxRetries - 1) {
+        console.log(`[RECALL] Transcript not ready yet (attempt ${attempt + 1}/${maxRetries}), retrying...`);
+        await delay(10_000);
+        continue;
+      }
+      throw new Error(`Recall.ai transcript error: ${response.status} — ${errorText}`);
+    }
+
+    const data = await response.json() as any[];
+
+    const segments: Array<{ speaker: string; text: string; start: number; end: number }> = [];
+    const textParts: string[] = [];
+
+    for (const entry of data) {
+      const speaker = entry.speaker || 'Unknown';
+      const words = entry.words || [];
+      if (words.length === 0) continue;
+
+      const text = words.map((w: any) => w.text).join(' ');
+      const start = words[0].start_time || 0;
+      const end = words[words.length - 1].end_time || start;
+
+      segments.push({ speaker, text, start, end });
+      textParts.push(`${speaker}: ${text}`);
+    }
+
+    // If transcript is empty and we have retries left, wait and try again
+    if (textParts.length === 0 && attempt < maxRetries - 1) {
+      console.log(`[RECALL] Transcript empty (attempt ${attempt + 1}/${maxRetries}), retrying...`);
+      await delay(10_000);
+      continue;
+    }
+
+    return {
+      segments,
+      fullText: textParts.join('\n'),
+    };
   }
 
-  const data = await response.json() as any[];
-
-  const segments: Array<{ speaker: string; text: string; start: number; end: number }> = [];
-  const textParts: string[] = [];
-
-  for (const entry of data) {
-    const speaker = entry.speaker || 'Unknown';
-    const words = entry.words || [];
-    if (words.length === 0) continue;
-
-    const text = words.map((w: any) => w.text).join(' ');
-    const start = words[0].start_time || 0;
-    const end = words[words.length - 1].end_time || start;
-
-    segments.push({ speaker, text, start, end });
-    textParts.push(`${speaker}: ${text}`);
-  }
-
-  return {
-    segments,
-    fullText: textParts.join('\n'),
-  };
+  // Should not reach here, but just in case
+  return { segments: [], fullText: '' };
 }
