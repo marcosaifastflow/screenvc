@@ -28,6 +28,13 @@ export async function createRecallBot(
     body: JSON.stringify({
       meeting_url: meetLink,
       bot_name: botName,
+      recording_config: {
+        transcript: {
+          provider: {
+            meeting_captions: {},
+          },
+        },
+      },
     }),
   });
 
