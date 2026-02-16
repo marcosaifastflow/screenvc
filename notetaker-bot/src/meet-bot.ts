@@ -3,20 +3,19 @@
 const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
 const RECALL_API_BASE = `https://${RECALL_REGION}.recall.ai/api/v1`;
 
-interface RecallBotResponse {
-  id: string;
-  status_changes: Array<{ code: string; created_at: string }>;
-  meeting_url: string;
+function getApiKey(): string {
+  const apiKey = process.env.RECALL_API_KEY;
+  if (!apiKey) throw new Error('RECALL_API_KEY is not configured');
+  return apiKey;
 }
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function createRecallBot(
   meetLink: string,
   botName: string,
 ): Promise<{ botId: string }> {
-  const apiKey = process.env.RECALL_API_KEY;
-  if (!apiKey) {
-    throw new Error('RECALL_API_KEY is not configured');
-  }
+  const apiKey = getApiKey();
 
   console.log(`[RECALL] Creating bot for meeting: ${meetLink}`);
 
@@ -38,7 +37,7 @@ export async function createRecallBot(
     throw new Error(`Recall.ai API error: ${response.status} — ${errorText}`);
   }
 
-  const data = (await response.json()) as RecallBotResponse;
+  const data = await response.json() as any;
   console.log(`[RECALL] Bot created: ${data.id}`);
 
   return { botId: data.id };
@@ -47,8 +46,7 @@ export async function createRecallBot(
 export async function getRecallBotStatus(botId: string): Promise<{
   status: string;
 }> {
-  const apiKey = process.env.RECALL_API_KEY;
-  if (!apiKey) throw new Error('RECALL_API_KEY is not configured');
+  const apiKey = getApiKey();
 
   const response = await fetch(`${RECALL_API_BASE}/bot/${botId}`, {
     headers: { 'Authorization': `Token ${apiKey}` },
@@ -61,7 +59,6 @@ export async function getRecallBotStatus(botId: string): Promise<{
 
   const data = await response.json() as any;
 
-  // Get the latest status
   const statusChanges = data.status_changes || [];
   const latestStatus = statusChanges.length > 0
     ? statusChanges[statusChanges.length - 1].code
@@ -70,58 +67,91 @@ export async function getRecallBotStatus(botId: string): Promise<{
   return { status: latestStatus };
 }
 
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 export async function getRecallBotTranscript(
   botId: string,
-  maxRetries = 5,
+  maxRetries = 10,
 ): Promise<{
   segments: Array<{ speaker: string; text: string; start: number; end: number }>;
   fullText: string;
 }> {
-  const apiKey = process.env.RECALL_API_KEY;
-  if (!apiKey) throw new Error('RECALL_API_KEY is not configured');
+  const apiKey = getApiKey();
 
-  // Recall.ai may take a moment to finalize the transcript after call_ended,
-  // so retry a few times with backoff if we get an empty result.
+  // The new Recall.ai API provides transcripts via the bot object:
+  // bot.recordings[].media_shortcuts.transcript.data.download_url
+  // We poll the bot until the transcript download URL is available, then fetch it.
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const response = await fetch(`${RECALL_API_BASE}/bot/${botId}/transcript`, {
+    // Step 1: Get the bot object to find the transcript download URL
+    const botResponse = await fetch(`${RECALL_API_BASE}/bot/${botId}`, {
       headers: { 'Authorization': `Token ${apiKey}` },
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      // 404 means transcript not ready yet — retry
-      if (response.status === 404 && attempt < maxRetries - 1) {
-        console.log(`[RECALL] Transcript not ready yet (attempt ${attempt + 1}/${maxRetries}), retrying...`);
+    if (!botResponse.ok) {
+      const errorText = await botResponse.text();
+      throw new Error(`Recall.ai bot retrieve error: ${botResponse.status} — ${errorText}`);
+    }
+
+    const botData = await botResponse.json() as any;
+    const recordings = botData.recordings || [];
+
+    // Find transcript download URL from recordings
+    let downloadUrl: string | null = null;
+    for (const recording of recordings) {
+      const transcriptUrl = recording?.media_shortcuts?.transcript?.data?.download_url;
+      if (transcriptUrl) {
+        downloadUrl = transcriptUrl;
+        break;
+      }
+    }
+
+    if (!downloadUrl) {
+      if (attempt < maxRetries - 1) {
+        console.log(`[RECALL] Transcript not ready yet (attempt ${attempt + 1}/${maxRetries}), retrying in 15s...`);
+        await delay(15_000);
+        continue;
+      }
+      throw new Error('Transcript download URL not available after all retries');
+    }
+
+    // Step 2: Download the transcript JSON
+    console.log(`[RECALL] Downloading transcript from: ${downloadUrl}`);
+    const transcriptResponse = await fetch(downloadUrl);
+
+    if (!transcriptResponse.ok) {
+      if (attempt < maxRetries - 1) {
+        console.log(`[RECALL] Transcript download failed (${transcriptResponse.status}), retrying...`);
         await delay(10_000);
         continue;
       }
-      throw new Error(`Recall.ai transcript error: ${response.status} — ${errorText}`);
+      const errorText = await transcriptResponse.text();
+      throw new Error(`Recall.ai transcript download error: ${transcriptResponse.status} — ${errorText}`);
     }
 
-    const data = await response.json() as any[];
+    const data = await transcriptResponse.json() as any[];
 
+    // Step 3: Parse the transcript
+    // Format: [{ participant: { name }, words: [{ text, start_timestamp: { relative }, end_timestamp: { relative } }] }]
     const segments: Array<{ speaker: string; text: string; start: number; end: number }> = [];
     const textParts: string[] = [];
 
     for (const entry of data) {
-      const speaker = entry.speaker || 'Unknown';
+      const speaker = entry.participant?.name || entry.speaker || 'Unknown';
       const words = entry.words || [];
       if (words.length === 0) continue;
 
       const text = words.map((w: any) => w.text).join(' ');
-      const start = words[0].start_time || 0;
-      const end = words[words.length - 1].end_time || start;
+
+      // Support both old format (start_time/end_time) and new format (start_timestamp.relative/end_timestamp.relative)
+      const start = words[0].start_timestamp?.relative ?? words[0].start_time ?? 0;
+      const end = words[words.length - 1].end_timestamp?.relative ?? words[words.length - 1].end_time ?? start;
 
       segments.push({ speaker, text, start, end });
       textParts.push(`${speaker}: ${text}`);
     }
 
-    // If transcript is empty and we have retries left, wait and try again
     if (textParts.length === 0 && attempt < maxRetries - 1) {
       console.log(`[RECALL] Transcript empty (attempt ${attempt + 1}/${maxRetries}), retrying...`);
-      await delay(10_000);
+      await delay(15_000);
       continue;
     }
 
@@ -131,6 +161,5 @@ export async function getRecallBotTranscript(
     };
   }
 
-  // Should not reach here, but just in case
   return { segments: [], fullText: '' };
 }
