@@ -13,7 +13,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
       <nav className=" bg-primary backdrop-blur sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between bg-[#00000000]">
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-xl font-semibold">ScreenVC</span>
+            <img src="/logo.png" alt="ScreenVC" className="h-8" />
           </div>
           <Button onClick={onGetStarted} className="bg-black text-white font-semibold hover:bg-black hover:text-white hover:scale-105 transition-transform">Get Started</Button>
         </div>
