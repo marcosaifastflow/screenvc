@@ -8,6 +8,7 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
@@ -25,6 +26,7 @@ interface CallsPageProps {
   accessToken?: string | null;
   onBackToHub: () => void;
   onOpenApplication: (submissionId: string) => void;
+  onOpenIntelligence?: (callId: string) => void;
 }
 
 type NotetakerStatusMap = Record<string, NotetakerSession | null>;
@@ -56,7 +58,7 @@ function NotetakerBadge({ session }: { session: NotetakerSession | null }) {
   );
 }
 
-export function CallsPage({ accessToken, onBackToHub, onOpenApplication }: CallsPageProps) {
+export function CallsPage({ accessToken, onBackToHub, onOpenApplication, onOpenIntelligence }: CallsPageProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [calls, setCalls] = useState<ScheduledCall[]>([]);
   const [notetakerStatuses, setNotetakerStatuses] = useState<NotetakerStatusMap>({});
@@ -259,6 +261,12 @@ export function CallsPage({ accessToken, onBackToHub, onOpenApplication }: Calls
             <Button variant="outline" onClick={() => handleViewNotes(call.id, call.companyName)}>
               <FileText className="size-4 mr-2" />
               View Notes
+            </Button>
+          )}
+          {hasNotes && onOpenIntelligence && (
+            <Button onClick={() => onOpenIntelligence(call.id)}>
+              <Sparkles className="size-4 mr-2" />
+              Deal Intelligence
             </Button>
           )}
           {call.submissionId && (

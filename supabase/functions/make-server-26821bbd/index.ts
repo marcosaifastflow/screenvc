@@ -4286,4 +4286,405 @@ app.post("/make-server-26821bbd/communications/mailbox/sync", async (c) => {
   }
 });
 
+// ========================================
+// DEAL INTELLIGENCE REPORT
+// ========================================
+
+// GET cached intelligence report for a call
+app.get("/make-server-26821bbd/calls/:callId/intelligence-report", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    const { data: rows, error } = await db
+      .from('call_intelligence_reports')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .limit(1);
+
+    if (error) {
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    if (!rows || rows.length === 0) {
+      return c.json({ success: true, report: null });
+    }
+
+    return c.json({ success: true, report: rows[0].report, cached: true });
+  } catch (error) {
+    console.error('[GET INTELLIGENCE REPORT] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// POST generate intelligence report for a call
+app.post("/make-server-26821bbd/calls/:callId/intelligence-report/generate", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    // Check for cached report first
+    const { data: existingRows } = await db
+      .from('call_intelligence_reports')
+      .select('report')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .limit(1);
+
+    if (existingRows && existingRows.length > 0 && existingRows[0].report) {
+      return c.json({ success: true, report: existingRows[0].report, cached: true });
+    }
+
+    // Load call details
+    const { data: callRow, error: callError } = await db
+      .from('application_calls')
+      .select('*')
+      .eq('id', callId)
+      .eq('owner_user_id', user.id)
+      .single();
+
+    if (callError || !callRow) {
+      return c.json({ success: false, error: 'Call not found or not authorized.' }, 404);
+    }
+
+    // Load transcript
+    const { data: transcripts } = await db
+      .from('call_transcripts')
+      .select('full_text, segments')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const transcriptText = transcripts?.[0]?.full_text || '';
+    if (!transcriptText) {
+      return c.json({ success: false, error: 'No transcript available for this call. Ensure the notetaker has completed.' }, 400);
+    }
+
+    // Load summary
+    const { data: summaries } = await db
+      .from('call_summaries')
+      .select('overall_summary, key_points, action_items, concerns, next_steps, founder_impressions')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const summaryRow = summaries?.[0] ?? null;
+
+    // Load VC thesis
+    const { data: criteriaRow } = await db
+      .from('vc_criteria')
+      .select('thesis')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    const vcThesis = criteriaRow?.thesis ?? {};
+
+    // Load submission data if call has a submission
+    let submissionData: Record<string, unknown> = {};
+    let fitEvaluation: Record<string, unknown> | null = null;
+    const submissionId = callRow.submission_id;
+    if (submissionId) {
+      const { data: subRow } = await db
+        .from('submissions')
+        .select('data, ai_fit_evaluation')
+        .eq('id', submissionId)
+        .maybeSingle();
+
+      if (subRow) {
+        submissionData = (subRow.data as Record<string, unknown>) ?? {};
+        fitEvaluation = (subRow.ai_fit_evaluation as Record<string, unknown>) ?? null;
+      }
+    }
+
+    // Truncate transcript to ~40k chars for the prompt
+    const truncatedTranscript = transcriptText.length > 40000
+      ? transcriptText.slice(0, 40000) + '\n\n[TRANSCRIPT TRUNCATED]'
+      : transcriptText;
+
+    // Build the AI prompt
+    const companyName = typeof callRow.company_name === 'string' ? callRow.company_name : 'Unknown Company';
+    const callDate = typeof callRow.scheduled_at === 'string'
+      ? new Date(callRow.scheduled_at).toLocaleDateString()
+      : new Date().toLocaleDateString();
+
+    const apiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!apiKey) {
+      return c.json({ success: false, error: 'OpenAI API key not configured.' }, 500);
+    }
+
+    const intelligenceSchema = {
+      type: 'object' as const,
+      additionalProperties: false,
+      properties: {
+        header: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            companyName: { type: 'string' as const },
+            stage: { type: 'string' as const },
+            sector: { type: 'string' as const },
+            fundraisingTarget: { type: 'string' as const },
+            callDate: { type: 'string' as const },
+            thesisAlignmentScore: { type: 'number' as const },
+          },
+          required: ['companyName', 'stage', 'sector', 'fundraisingTarget', 'callDate', 'thesisAlignmentScore'],
+        },
+        executiveSummary: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            summary: { type: 'string' as const },
+            investmentSignal: { type: 'string' as const, enum: ['Strong Pass', 'Lean Pass', 'Neutral', 'Lean Invest', 'Strong Invest'] },
+            signalRationale: { type: 'string' as const },
+          },
+          required: ['summary', 'investmentSignal', 'signalRationale'],
+        },
+        founderAnalysis: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            dimensions: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  name: { type: 'string' as const },
+                  score: { type: 'number' as const },
+                  assessment: { type: 'string' as const },
+                  evidence: { type: 'string' as const },
+                },
+                required: ['name', 'score', 'assessment', 'evidence'],
+              },
+            },
+          },
+          required: ['dimensions'],
+        },
+        riskDashboard: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            flags: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  severity: { type: 'string' as const, enum: ['red', 'yellow', 'green'] },
+                  category: { type: 'string' as const },
+                  description: { type: 'string' as const },
+                  evidence: { type: 'string' as const },
+                },
+                required: ['severity', 'category', 'description', 'evidence'],
+              },
+            },
+          },
+          required: ['flags'],
+        },
+        competitiveIntelligence: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            competitors: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  name: { type: 'string' as const },
+                  description: { type: 'string' as const },
+                  threatLevel: { type: 'string' as const, enum: ['Low', 'Medium', 'High'] },
+                },
+                required: ['name', 'description', 'threatLevel'],
+              },
+            },
+            differentiation: { type: 'string' as const },
+            positioning: { type: 'string' as const },
+          },
+          required: ['competitors', 'differentiation', 'positioning'],
+        },
+        questionCoverage: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            overallCoveragePercent: { type: 'number' as const },
+            areas: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  area: { type: 'string' as const },
+                  coveragePercent: { type: 'number' as const },
+                  covered: { type: 'array' as const, items: { type: 'string' as const } },
+                  gaps: { type: 'array' as const, items: { type: 'string' as const } },
+                },
+                required: ['area', 'coveragePercent', 'covered', 'gaps'],
+              },
+            },
+            suggestedFollowUps: { type: 'array' as const, items: { type: 'string' as const } },
+          },
+          required: ['overallCoveragePercent', 'areas', 'suggestedFollowUps'],
+        },
+        dealStrengthScore: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            overall: { type: 'number' as const },
+            breakdown: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  dimension: { type: 'string' as const },
+                  score: { type: 'number' as const },
+                  weight: { type: 'number' as const },
+                },
+                required: ['dimension', 'score', 'weight'],
+              },
+            },
+          },
+          required: ['overall', 'breakdown'],
+        },
+        icMemo: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            title: { type: 'string' as const },
+            sections: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  heading: { type: 'string' as const },
+                  content: { type: 'string' as const },
+                },
+                required: ['heading', 'content'],
+              },
+            },
+          },
+          required: ['title', 'sections'],
+        },
+        transcriptAnnotations: {
+          type: 'array' as const,
+          items: {
+            type: 'object' as const,
+            additionalProperties: false,
+            properties: {
+              quote: { type: 'string' as const },
+              type: { type: 'string' as const, enum: ['risk', 'signal', 'metric', 'competitor'] },
+              label: { type: 'string' as const },
+            },
+            required: ['quote', 'type', 'label'],
+          },
+        },
+      },
+      required: [
+        'header', 'executiveSummary', 'founderAnalysis', 'riskDashboard',
+        'competitiveIntelligence', 'questionCoverage', 'dealStrengthScore',
+        'icMemo', 'transcriptAnnotations',
+      ],
+    };
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: Deno.env.get('OPENAI_MODEL') ?? 'gpt-4.1-mini',
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'deal_intelligence_report',
+            strict: true,
+            schema: intelligenceSchema,
+          },
+        },
+        messages: [
+          {
+            role: 'system',
+            content: `You are an elite VC analyst producing a Deal Intelligence Report. Given a call transcript, startup data, and VC thesis, produce a comprehensive structured analysis. Be evidence-based and cite transcript quotes where applicable. Scores should be 0-100. For founderAnalysis, evaluate dimensions: Domain Expertise, Communication Clarity, Vision & Ambition, Coachability, Technical Depth, and Market Understanding. For questionCoverage areas, evaluate: Team & Founders, Product & Technology, Market & Competition, Business Model & Unit Economics, Traction & Metrics, Fundraising & Use of Funds. Return valid JSON only.`,
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              companyName,
+              callDate,
+              vcThesis,
+              startupData: submissionData,
+              existingFitEvaluation: fitEvaluation,
+              callSummary: summaryRow ? {
+                overallSummary: summaryRow.overall_summary,
+                keyPoints: summaryRow.key_points,
+                actionItems: summaryRow.action_items,
+                concerns: summaryRow.concerns,
+                nextSteps: summaryRow.next_steps,
+                founderImpressions: summaryRow.founder_impressions,
+              } : null,
+              transcript: truncatedTranscript,
+            }),
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error('[INTELLIGENCE REPORT] OpenAI error:', response.status, errBody);
+      return c.json({ success: false, error: `AI generation failed (HTTP ${response.status})` }, 500);
+    }
+
+    const aiResult = await response.json();
+    const content = aiResult?.choices?.[0]?.message?.content;
+    if (!content) {
+      return c.json({ success: false, error: 'Empty AI response' }, 500);
+    }
+
+    let report: Record<string, unknown>;
+    try {
+      report = JSON.parse(content);
+    } catch {
+      console.error('[INTELLIGENCE REPORT] Failed to parse AI response:', content.substring(0, 500));
+      return c.json({ success: false, error: 'Invalid AI response format' }, 500);
+    }
+
+    // Upsert into call_intelligence_reports
+    const { error: upsertError } = await db
+      .from('call_intelligence_reports')
+      .upsert({
+        call_id: callId,
+        owner_user_id: user.id,
+        report,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'call_id' });
+
+    if (upsertError) {
+      console.error('[INTELLIGENCE REPORT] Upsert error:', upsertError);
+      // Still return the report even if caching failed
+    }
+
+    return c.json({ success: true, report, cached: false });
+  } catch (error) {
+    console.error('[INTELLIGENCE REPORT GENERATE] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
 Deno.serve(app.fetch);

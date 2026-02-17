@@ -1701,6 +1701,286 @@ export async function getCallSummary(callId: string, accessToken?: string | null
 }
 
 // ========================================
+// DEAL INTELLIGENCE REPORT
+// ========================================
+
+export interface IntelligenceReportHeader {
+  companyName: string;
+  stage: string;
+  sector: string;
+  fundraisingTarget: string;
+  callDate: string;
+  thesisAlignmentScore: number;
+}
+
+export interface IntelligenceExecutiveSummary {
+  summary: string;
+  investmentSignal: 'Strong Pass' | 'Lean Pass' | 'Neutral' | 'Lean Invest' | 'Strong Invest';
+  signalRationale: string;
+}
+
+export interface FounderDimension {
+  name: string;
+  score: number;
+  assessment: string;
+  evidence: string;
+}
+
+export interface RiskFlag {
+  severity: 'red' | 'yellow' | 'green';
+  category: string;
+  description: string;
+  evidence: string;
+}
+
+export interface Competitor {
+  name: string;
+  description: string;
+  threatLevel: 'Low' | 'Medium' | 'High';
+}
+
+export interface CoverageArea {
+  area: string;
+  coveragePercent: number;
+  covered: string[];
+  gaps: string[];
+}
+
+export interface DealStrengthBreakdown {
+  dimension: string;
+  score: number;
+  weight: number;
+}
+
+export interface ICMemoSection {
+  heading: string;
+  content: string;
+}
+
+export interface TranscriptAnnotation {
+  quote: string;
+  type: 'risk' | 'signal' | 'metric' | 'competitor';
+  label: string;
+}
+
+export interface DealIntelligenceReport {
+  header: IntelligenceReportHeader;
+  executiveSummary: IntelligenceExecutiveSummary;
+  founderAnalysis: { dimensions: FounderDimension[] };
+  riskDashboard: { flags: RiskFlag[] };
+  competitiveIntelligence: {
+    competitors: Competitor[];
+    differentiation: string;
+    positioning: string;
+  };
+  questionCoverage: {
+    overallCoveragePercent: number;
+    areas: CoverageArea[];
+    suggestedFollowUps: string[];
+  };
+  dealStrengthScore: {
+    overall: number;
+    breakdown: DealStrengthBreakdown[];
+  };
+  icMemo: {
+    title: string;
+    sections: ICMemoSection[];
+  };
+  transcriptAnnotations: TranscriptAnnotation[];
+}
+
+const normalizeIntelligenceReport = (value: unknown): DealIntelligenceReport | null => {
+  if (!isObject(value)) return null;
+
+  const header = isObject(value.header) ? value.header : {};
+  const exec = isObject(value.executiveSummary) ? value.executiveSummary : {};
+  const founder = isObject(value.founderAnalysis) ? value.founderAnalysis : {};
+  const risk = isObject(value.riskDashboard) ? value.riskDashboard : {};
+  const compete = isObject(value.competitiveIntelligence) ? value.competitiveIntelligence : {};
+  const coverage = isObject(value.questionCoverage) ? value.questionCoverage : {};
+  const strength = isObject(value.dealStrengthScore) ? value.dealStrengthScore : {};
+  const memo = isObject(value.icMemo) ? value.icMemo : {};
+
+  const validSignals = ['Strong Pass', 'Lean Pass', 'Neutral', 'Lean Invest', 'Strong Invest'] as const;
+  const rawSignal = exec.investmentSignal;
+  const signal = validSignals.includes(rawSignal as typeof validSignals[number])
+    ? (rawSignal as typeof validSignals[number])
+    : 'Neutral';
+
+  return {
+    header: {
+      companyName: typeof header.companyName === 'string' ? header.companyName : 'Company',
+      stage: typeof header.stage === 'string' ? header.stage : '',
+      sector: typeof header.sector === 'string' ? header.sector : '',
+      fundraisingTarget: typeof header.fundraisingTarget === 'string' ? header.fundraisingTarget : '',
+      callDate: typeof header.callDate === 'string' ? header.callDate : '',
+      thesisAlignmentScore: typeof header.thesisAlignmentScore === 'number' ? header.thesisAlignmentScore : 0,
+    },
+    executiveSummary: {
+      summary: typeof exec.summary === 'string' ? exec.summary : '',
+      investmentSignal: signal,
+      signalRationale: typeof exec.signalRationale === 'string' ? exec.signalRationale : '',
+    },
+    founderAnalysis: {
+      dimensions: Array.isArray(founder.dimensions)
+        ? founder.dimensions.filter(isObject).map((d): FounderDimension => ({
+            name: typeof d.name === 'string' ? d.name : '',
+            score: typeof d.score === 'number' ? d.score : 0,
+            assessment: typeof d.assessment === 'string' ? d.assessment : '',
+            evidence: typeof d.evidence === 'string' ? d.evidence : '',
+          }))
+        : [],
+    },
+    riskDashboard: {
+      flags: Array.isArray(risk.flags)
+        ? risk.flags.filter(isObject).map((f): RiskFlag => ({
+            severity: (['red', 'yellow', 'green'] as const).includes(f.severity as 'red')
+              ? (f.severity as 'red' | 'yellow' | 'green') : 'yellow',
+            category: typeof f.category === 'string' ? f.category : '',
+            description: typeof f.description === 'string' ? f.description : '',
+            evidence: typeof f.evidence === 'string' ? f.evidence : '',
+          }))
+        : [],
+    },
+    competitiveIntelligence: {
+      competitors: Array.isArray(compete.competitors)
+        ? compete.competitors.filter(isObject).map((comp): Competitor => ({
+            name: typeof comp.name === 'string' ? comp.name : '',
+            description: typeof comp.description === 'string' ? comp.description : '',
+            threatLevel: (['Low', 'Medium', 'High'] as const).includes(comp.threatLevel as 'Low')
+              ? (comp.threatLevel as 'Low' | 'Medium' | 'High') : 'Medium',
+          }))
+        : [],
+      differentiation: typeof compete.differentiation === 'string' ? compete.differentiation : '',
+      positioning: typeof compete.positioning === 'string' ? compete.positioning : '',
+    },
+    questionCoverage: {
+      overallCoveragePercent: typeof coverage.overallCoveragePercent === 'number' ? coverage.overallCoveragePercent : 0,
+      areas: Array.isArray(coverage.areas)
+        ? coverage.areas.filter(isObject).map((a): CoverageArea => ({
+            area: typeof a.area === 'string' ? a.area : '',
+            coveragePercent: typeof a.coveragePercent === 'number' ? a.coveragePercent : 0,
+            covered: Array.isArray(a.covered) ? a.covered.filter((s): s is string => typeof s === 'string') : [],
+            gaps: Array.isArray(a.gaps) ? a.gaps.filter((s): s is string => typeof s === 'string') : [],
+          }))
+        : [],
+      suggestedFollowUps: Array.isArray(coverage.suggestedFollowUps)
+        ? coverage.suggestedFollowUps.filter((s): s is string => typeof s === 'string')
+        : [],
+    },
+    dealStrengthScore: {
+      overall: typeof strength.overall === 'number' ? strength.overall : 0,
+      breakdown: Array.isArray(strength.breakdown)
+        ? strength.breakdown.filter(isObject).map((b): DealStrengthBreakdown => ({
+            dimension: typeof b.dimension === 'string' ? b.dimension : '',
+            score: typeof b.score === 'number' ? b.score : 0,
+            weight: typeof b.weight === 'number' ? b.weight : 0,
+          }))
+        : [],
+    },
+    icMemo: {
+      title: typeof memo.title === 'string' ? memo.title : 'IC Memo',
+      sections: Array.isArray(memo.sections)
+        ? memo.sections.filter(isObject).map((s): ICMemoSection => ({
+            heading: typeof s.heading === 'string' ? s.heading : '',
+            content: typeof s.content === 'string' ? s.content : '',
+          }))
+        : [],
+    },
+    transcriptAnnotations: Array.isArray(value.transcriptAnnotations)
+      ? value.transcriptAnnotations.filter(isObject).map((a): TranscriptAnnotation => ({
+          quote: typeof a.quote === 'string' ? a.quote : '',
+          type: (['risk', 'signal', 'metric', 'competitor'] as const).includes(a.type as 'risk')
+            ? (a.type as 'risk' | 'signal' | 'metric' | 'competitor') : 'signal',
+          label: typeof a.label === 'string' ? a.label : '',
+        }))
+      : [],
+  };
+};
+
+export async function getDealIntelligenceReport(callId: string, accessToken?: string | null) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', report: null as DealIntelligenceReport | null };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/calls/${encodeURIComponent(callId)}/intelligence-report`, {
+        method: 'GET',
+        headers: buildHeaders(token, false),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) {
+        response = await doRequest(validToken);
+      }
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to load intelligence report'),
+        report: null as DealIntelligenceReport | null,
+      };
+    }
+
+    return {
+      success: true,
+      report: result.report ? normalizeIntelligenceReport(result.report) : null,
+      cached: Boolean(result.cached),
+    };
+  } catch (error) {
+    console.error('[GET INTELLIGENCE REPORT EXCEPTION]', error);
+    return { success: false, error: String(error), report: null as DealIntelligenceReport | null };
+  }
+}
+
+export async function generateDealIntelligenceReport(callId: string, accessToken?: string | null) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', report: null as DealIntelligenceReport | null };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/calls/${encodeURIComponent(callId)}/intelligence-report/generate`, {
+        method: 'POST',
+        headers: buildHeaders(token),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) {
+        response = await doRequest(validToken);
+      }
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to generate intelligence report'),
+        report: null as DealIntelligenceReport | null,
+      };
+    }
+
+    return {
+      success: true,
+      report: normalizeIntelligenceReport(result.report),
+      cached: Boolean(result.cached),
+    };
+  } catch (error) {
+    console.error('[GENERATE INTELLIGENCE REPORT EXCEPTION]', error);
+    return { success: false, error: String(error), report: null as DealIntelligenceReport | null };
+  }
+}
+
+// ========================================
 // AUTH USER FORM LOAD (ONE FORM PER USER)
 // ========================================
 

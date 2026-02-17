@@ -10,6 +10,7 @@ import { FormResultsPage } from './components/FormResultsPage';
 import { ApplicationDetailsPage } from './components/ApplicationDetailsPage';
 import { EmailInboxPage } from './components/EmailInboxPage';
 import { CallsPage } from './components/CallsPage';
+import { DealIntelligencePage } from './components/DealIntelligencePage';
 import { Toaster } from './components/ui/sonner';
 import { getForm } from './utils/api';
 import { supabase } from './utils/supabase/client';
@@ -37,6 +38,7 @@ export default function App() {
     | 'application'
     | 'inbox'
     | 'calls'
+    | 'intelligence'
     | 'published'
     | 'notfound'
     | 'auth'
@@ -46,6 +48,7 @@ export default function App() {
   const [currentForm, setCurrentForm] = useState<PublishedFormData | null>(null);
   const [notFoundId, setNotFoundId] = useState('');
   const [selectedSubmissionId, setSelectedSubmissionId] = useState<string | null>(null);
+  const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
 
   const [authState, setAuthState] = useState<AuthState>({
     isAuthenticated: false,
@@ -202,6 +205,24 @@ export default function App() {
         return;
       }
 
+      // 7.5 Deal Intelligence
+      if (viewParam === 'intelligence') {
+        if (!authState.isAuthenticated) {
+          setView('auth');
+          return;
+        }
+
+        const callParam = params.get('call');
+        if (!callParam) {
+          setView('calls');
+          return;
+        }
+
+        setSelectedCallId(callParam);
+        setView('intelligence');
+        return;
+      }
+
       // 8️⃣ Default
       setView('landing');
     };
@@ -334,6 +355,17 @@ export default function App() {
           onOpenApplication={(submissionId) =>
             navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
           }
+          onOpenIntelligence={(callId) =>
+            navigate(`?view=intelligence&call=${encodeURIComponent(callId)}`)
+          }
+        />
+      )}
+
+      {view === 'intelligence' && selectedCallId && (
+        <DealIntelligencePage
+          callId={selectedCallId}
+          accessToken={authState.accessToken}
+          onBack={() => navigate('?view=calls')}
         />
       )}
 
