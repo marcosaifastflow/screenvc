@@ -115,8 +115,7 @@ export function AuthPage({ onAuthSuccess }: AuthPageProps) {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-2 mb-4">
-            <Sparkles className="size-8 text-primary" />
-            <h1 className="text-3xl font-bold">ScreenVC</h1>
+            <img src="/logo.png" alt="ScreenVC" className="h-12" />
           </div>
           <p className="text-muted-foreground">
             AI-powered application forms for VCs
