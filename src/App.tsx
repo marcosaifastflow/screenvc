@@ -11,6 +11,7 @@ import { ApplicationDetailsPage } from './components/ApplicationDetailsPage';
 import { EmailInboxPage } from './components/EmailInboxPage';
 import { CallsPage } from './components/CallsPage';
 import { DealIntelligencePage } from './components/DealIntelligencePage';
+import { PortfolioPage } from './components/PortfolioPage';
 import { Toaster } from './components/ui/sonner';
 import { getForm } from './utils/api';
 import { supabase } from './utils/supabase/client';
@@ -39,6 +40,7 @@ export default function App() {
     | 'inbox'
     | 'calls'
     | 'intelligence'
+    | 'portfolio'
     | 'published'
     | 'notfound'
     | 'auth'
@@ -223,7 +225,18 @@ export default function App() {
         return;
       }
 
-      // 8️⃣ Default
+      // 8️⃣ Portfolio
+      if (viewParam === 'portfolio') {
+        if (!authState.isAuthenticated) {
+          setView('auth');
+          return;
+        }
+
+        setView('portfolio');
+        return;
+      }
+
+      // 9️⃣ Default
       setView('landing');
     };
 
@@ -294,6 +307,7 @@ export default function App() {
           onOpenResults={() => navigate('?view=results')}
           onOpenInbox={() => navigate('?view=inbox')}
           onOpenCalls={() => navigate('?view=calls')}
+          onOpenPortfolio={() => navigate('?view=portfolio')}
           onLogout={handleLogout}
         />
       )}
@@ -366,6 +380,13 @@ export default function App() {
           callId={selectedCallId}
           accessToken={authState.accessToken}
           onBack={() => navigate('?view=calls')}
+        />
+      )}
+
+      {view === 'portfolio' && (
+        <PortfolioPage
+          accessToken={authState.accessToken}
+          onBackToHub={() => navigate('?view=hub')}
         />
       )}
 

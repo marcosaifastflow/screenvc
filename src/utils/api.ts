@@ -1980,6 +1980,301 @@ export async function generateDealIntelligenceReport(callId: string, accessToken
   }
 }
 
+export async function getSubmissionIntelligenceReport(formId: string, submissionId: string, accessToken?: string | null) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', report: null as DealIntelligenceReport | null };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/forms/${encodeURIComponent(formId)}/submissions/${encodeURIComponent(submissionId)}/intelligence-report`, {
+        method: 'GET',
+        headers: buildHeaders(token, false),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) {
+        response = await doRequest(validToken);
+      }
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to load intelligence report'),
+        report: null as DealIntelligenceReport | null,
+      };
+    }
+
+    return {
+      success: true,
+      report: result.report ? normalizeIntelligenceReport(result.report) : null,
+    };
+  } catch (error) {
+    console.error('[GET SUBMISSION INTELLIGENCE REPORT EXCEPTION]', error);
+    return { success: false, error: String(error), report: null as DealIntelligenceReport | null };
+  }
+}
+
+// ========================================
+// PORTFOLIO
+// ========================================
+
+export interface PortfolioCompany {
+  id: string;
+  companyName: string;
+  industry: string | null;
+  country: string | null;
+  continent: string | null;
+  fundingStage: string | null;
+  dealSize: number | null;
+  investmentDate: string | null;
+  valuation: number | null;
+  equityPercent: number | null;
+  status: 'active' | 'exited' | 'written-off';
+  submissionId: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PortfolioRecommendation {
+  companyName: string;
+  submissionId: string;
+  rationale: string;
+  fitScore: number;
+  diversificationBenefit: string;
+}
+
+const normalizePortfolioCompany = (value: unknown): PortfolioCompany => {
+  const obj = isObject(value) ? value : {};
+  const statusVal = obj.status;
+  const status: PortfolioCompany['status'] =
+    statusVal === 'exited' || statusVal === 'written-off' ? statusVal : 'active';
+
+  return {
+    id: typeof obj.id === 'string' ? obj.id : crypto.randomUUID(),
+    companyName: typeof obj.companyName === 'string' ? obj.companyName : 'Company',
+    industry: typeof obj.industry === 'string' ? obj.industry : null,
+    country: typeof obj.country === 'string' ? obj.country : null,
+    continent: typeof obj.continent === 'string' ? obj.continent : null,
+    fundingStage: typeof obj.fundingStage === 'string' ? obj.fundingStage : null,
+    dealSize: typeof obj.dealSize === 'number' ? obj.dealSize : null,
+    investmentDate: typeof obj.investmentDate === 'string' ? obj.investmentDate : null,
+    valuation: typeof obj.valuation === 'number' ? obj.valuation : null,
+    equityPercent: typeof obj.equityPercent === 'number' ? obj.equityPercent : null,
+    status,
+    submissionId: typeof obj.submissionId === 'string' ? obj.submissionId : null,
+    notes: typeof obj.notes === 'string' ? obj.notes : null,
+    createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
+    updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
+  };
+};
+
+export async function getPortfolio(accessToken?: string | null) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', companies: [] as PortfolioCompany[] };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/portfolio`, {
+        method: 'GET',
+        headers: buildHeaders(token, false),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) response = await doRequest(validToken);
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to load portfolio'),
+        companies: [] as PortfolioCompany[],
+      };
+    }
+
+    const companies = Array.isArray(result.companies)
+      ? result.companies.map(normalizePortfolioCompany)
+      : [];
+
+    return { success: true, companies };
+  } catch (error) {
+    console.error('[GET PORTFOLIO EXCEPTION]', error);
+    return { success: false, error: String(error), companies: [] as PortfolioCompany[] };
+  }
+}
+
+export async function addPortfolioCompany(
+  data: Omit<PortfolioCompany, 'id' | 'createdAt' | 'updatedAt'>,
+  accessToken?: string | null,
+) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', company: null as PortfolioCompany | null };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/portfolio`, {
+        method: 'POST',
+        headers: buildHeaders(token),
+        body: JSON.stringify(data),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) response = await doRequest(validToken);
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to add portfolio company'),
+        company: null as PortfolioCompany | null,
+      };
+    }
+
+    return {
+      success: true,
+      company: isObject(result.company) ? normalizePortfolioCompany(result.company) : null,
+    };
+  } catch (error) {
+    console.error('[ADD PORTFOLIO COMPANY EXCEPTION]', error);
+    return { success: false, error: String(error), company: null as PortfolioCompany | null };
+  }
+}
+
+export async function updatePortfolioCompany(
+  id: string,
+  data: Partial<Omit<PortfolioCompany, 'id' | 'createdAt' | 'updatedAt'>>,
+  accessToken?: string | null,
+) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', company: null as PortfolioCompany | null };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/portfolio/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: buildHeaders(token),
+        body: JSON.stringify(data),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) response = await doRequest(validToken);
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to update portfolio company'),
+        company: null as PortfolioCompany | null,
+      };
+    }
+
+    return {
+      success: true,
+      company: isObject(result.company) ? normalizePortfolioCompany(result.company) : null,
+    };
+  } catch (error) {
+    console.error('[UPDATE PORTFOLIO COMPANY EXCEPTION]', error);
+    return { success: false, error: String(error), company: null as PortfolioCompany | null };
+  }
+}
+
+export async function deletePortfolioCompany(id: string, accessToken?: string | null) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available' };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/portfolio/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: buildHeaders(token, false),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) response = await doRequest(validToken);
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return { success: false, error: getErrorMessage(result, 'Failed to delete portfolio company') };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('[DELETE PORTFOLIO COMPANY EXCEPTION]', error);
+    return { success: false, error: String(error) };
+  }
+}
+
+export async function getPortfolioRecommendations(accessToken?: string | null) {
+  try {
+    let validToken = await getValidAccessToken(accessToken);
+    if (!validToken) {
+      return { success: false, error: 'No access token available', recommendations: [] as PortfolioRecommendation[] };
+    }
+
+    const doRequest = (token: string) =>
+      fetch(`${API_BASE_URL}/portfolio/ai-recommendations`, {
+        method: 'POST',
+        headers: buildHeaders(token),
+      });
+
+    let response = await doRequest(validToken);
+    if (response.status === 401) {
+      validToken = await getValidAccessToken(null);
+      if (validToken) response = await doRequest(validToken);
+    }
+
+    const result = await safeParseResponse(response);
+    if (!response.ok || !result.success) {
+      return {
+        success: false,
+        error: getErrorMessage(result, 'Failed to get AI recommendations'),
+        recommendations: [] as PortfolioRecommendation[],
+      };
+    }
+
+    const recommendations = Array.isArray(result.recommendations)
+      ? result.recommendations.filter(isObject).map((r): PortfolioRecommendation => ({
+          companyName: typeof r.companyName === 'string' ? r.companyName : 'Unknown',
+          submissionId: typeof r.submissionId === 'string' ? r.submissionId : '',
+          rationale: typeof r.rationale === 'string' ? r.rationale : '',
+          fitScore: typeof r.fitScore === 'number' ? r.fitScore : 0,
+          diversificationBenefit: typeof r.diversificationBenefit === 'string' ? r.diversificationBenefit : '',
+        }))
+      : [];
+
+    return { success: true, recommendations };
+  } catch (error) {
+    console.error('[GET PORTFOLIO RECOMMENDATIONS EXCEPTION]', error);
+    return { success: false, error: String(error), recommendations: [] as PortfolioRecommendation[] };
+  }
+}
+
 // ========================================
 // AUTH USER FORM LOAD (ONE FORM PER USER)
 // ========================================

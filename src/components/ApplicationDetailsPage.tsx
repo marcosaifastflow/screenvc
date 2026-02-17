@@ -1,11 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Calendar, ChevronDown, FileText } from 'lucide-react';
+import { ArrowLeft, Calendar, ChevronDown, FileText, Sparkles } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
+import { Progress } from './ui/progress';
+import { Separator } from './ui/separator';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from './ui/table';
 import { Textarea } from './ui/textarea';
 import {
   evaluateApplicationFit,
@@ -15,9 +25,11 @@ import {
   getForm,
   getApplicationMarketReport,
   getFormSubmissions,
+  getSubmissionIntelligenceReport,
   getUserPrimaryForm,
   scheduleApplicationCall,
   sendApplicationEmail,
+  type DealIntelligenceReport,
   type FinalConclusion,
   type MarketReport,
   type FitCriterionResult,
@@ -122,11 +134,14 @@ export function ApplicationDetailsPage({
   const [callDuration, setCallDuration] = useState('30');
   const [callNotes, setCallNotes] = useState('');
   const [isSchedulingCall, setIsSchedulingCall] = useState(false);
+  const [intelligenceReport, setIntelligenceReport] = useState<DealIntelligenceReport | null>(null);
+  const [isIntelligenceLoading, setIsIntelligenceLoading] = useState(false);
   const [openSections, setOpenSections] = useState({
     submissionDetails: false,
     thesisFit: false,
     investmentMemorandum: false,
     finalConclusions: false,
+    dealIntelligence: false,
   });
 
   useEffect(() => {
@@ -240,6 +255,17 @@ export function ApplicationDetailsPage({
       setIsMarketReportLoading(false);
       setIsFinalConclusionLoading(false);
       setIsLoading(false);
+
+      // Load deal intelligence report in background (non-blocking)
+      setIsIntelligenceLoading(true);
+      getSubmissionIntelligenceReport(formId, submissionId, accessToken).then((intResult) => {
+        if (!active) return;
+        if (intResult.success && intResult.report) {
+          setIntelligenceReport(intResult.report);
+          setOpenSections((prev) => ({ ...prev, dealIntelligence: true }));
+        }
+        setIsIntelligenceLoading(false);
+      });
     };
 
     load();
@@ -717,6 +743,283 @@ export function ApplicationDetailsPage({
                 </CollapsibleContent>
               </Card>
             </Collapsible>
+
+            {(intelligenceReport || isIntelligenceLoading) && (
+              <Collapsible
+                open={openSections.dealIntelligence}
+                onOpenChange={(open) =>
+                  setOpenSections((prev) => ({ ...prev, dealIntelligence: open }))
+                }
+              >
+                <Card className="border-primary/20 overflow-hidden">
+                  <CollapsibleTrigger asChild>
+                    <button type="button" className="w-full p-6 flex items-center justify-between text-left">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="size-5 text-primary" />
+                        <h2 className="text-xl">Deal Intelligence Report</h2>
+                      </div>
+                      <ChevronDown
+                        className={`size-5 transition-transform ${
+                          openSections.dealIntelligence ? 'rotate-180' : ''
+                        }`}
+                      />
+                    </button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="border-t border-primary/20 p-6 space-y-6">
+                      {isIntelligenceLoading && (
+                        <div className="rounded-lg border border-border p-4">
+                          <p className="text-sm text-muted-foreground">Loading deal intelligence report...</p>
+                        </div>
+                      )}
+
+                      {!isIntelligenceLoading && intelligenceReport && (
+                        <>
+                          {/* Header */}
+                          <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold">{intelligenceReport.header.companyName}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {[intelligenceReport.header.stage, intelligenceReport.header.sector].filter(Boolean).join(' · ')}
+                                {intelligenceReport.header.fundraisingTarget && ` · ${intelligenceReport.header.fundraisingTarget}`}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-3xl font-bold">{intelligenceReport.header.thesisAlignmentScore}</p>
+                              <p className="text-xs text-muted-foreground">Thesis Alignment</p>
+                            </div>
+                          </div>
+
+                          {/* Executive Summary */}
+                          <div className="space-y-2">
+                            <h3 className="text-base font-semibold">Executive Summary</h3>
+                            <div className="rounded-lg border border-border p-4 space-y-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <p className="text-sm leading-relaxed">{intelligenceReport.executiveSummary.summary}</p>
+                                <Badge className={`shrink-0 ${
+                                  intelligenceReport.executiveSummary.investmentSignal === 'Strong Invest' ? 'bg-green-100 text-green-800' :
+                                  intelligenceReport.executiveSummary.investmentSignal === 'Lean Invest' ? 'bg-emerald-100 text-emerald-800' :
+                                  intelligenceReport.executiveSummary.investmentSignal === 'Neutral' ? 'bg-gray-100 text-gray-800' :
+                                  intelligenceReport.executiveSummary.investmentSignal === 'Lean Pass' ? 'bg-orange-100 text-orange-800' :
+                                  'bg-red-100 text-red-800'
+                                }`}>
+                                  {intelligenceReport.executiveSummary.investmentSignal}
+                                </Badge>
+                              </div>
+                              <Separator />
+                              <div>
+                                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Signal Rationale</p>
+                                <p className="text-sm">{intelligenceReport.executiveSummary.signalRationale}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Founder Analysis */}
+                          {intelligenceReport.founderAnalysis.dimensions.length > 0 && (
+                            <div className="space-y-2">
+                              <h3 className="text-base font-semibold">Founder Analysis</h3>
+                              <div className="rounded-lg border border-border p-4 space-y-4">
+                                {intelligenceReport.founderAnalysis.dimensions.map((dim) => (
+                                  <div key={dim.name} className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-sm font-medium">{dim.name}</span>
+                                      <span className="text-sm font-semibold">{dim.score}</span>
+                                    </div>
+                                    <Progress value={dim.score} />
+                                    <p className="text-xs text-muted-foreground">{dim.assessment}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Risk Dashboard */}
+                          {intelligenceReport.riskDashboard.flags.length > 0 && (
+                            <div className="space-y-2">
+                              <h3 className="text-base font-semibold">Risk Dashboard</h3>
+                              <div className="space-y-2">
+                                {intelligenceReport.riskDashboard.flags.map((flag, i) => (
+                                  <div
+                                    key={i}
+                                    className={`rounded-lg border p-3 border-l-4 ${
+                                      flag.severity === 'red' ? 'border-l-red-500' :
+                                      flag.severity === 'yellow' ? 'border-l-yellow-500' :
+                                      'border-l-green-500'
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div>
+                                        <p className="text-sm font-medium">{flag.category}</p>
+                                        <p className="text-xs text-muted-foreground mt-0.5">{flag.description}</p>
+                                      </div>
+                                      <Badge variant="outline" className={`shrink-0 text-xs capitalize ${
+                                        flag.severity === 'red' ? 'border-red-300 text-red-700' :
+                                        flag.severity === 'yellow' ? 'border-yellow-300 text-yellow-700' :
+                                        'border-green-300 text-green-700'
+                                      }`}>
+                                        {flag.severity}
+                                      </Badge>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Competitive Intelligence */}
+                          {intelligenceReport.competitiveIntelligence.competitors.length > 0 && (
+                            <div className="space-y-2">
+                              <h3 className="text-base font-semibold">Competitive Intelligence</h3>
+                              <div className="rounded-lg border border-border p-4 space-y-3">
+                                <Table>
+                                  <TableHeader>
+                                    <TableRow>
+                                      <TableHead>Competitor</TableHead>
+                                      <TableHead>Description</TableHead>
+                                      <TableHead className="w-24">Threat</TableHead>
+                                    </TableRow>
+                                  </TableHeader>
+                                  <TableBody>
+                                    {intelligenceReport.competitiveIntelligence.competitors.map((comp) => (
+                                      <TableRow key={comp.name}>
+                                        <TableCell className="font-medium">{comp.name}</TableCell>
+                                        <TableCell className="text-sm text-muted-foreground">{comp.description}</TableCell>
+                                        <TableCell>
+                                          <Badge className={`text-xs ${
+                                            comp.threatLevel === 'High' ? 'bg-red-100 text-red-800' :
+                                            comp.threatLevel === 'Medium' ? 'bg-yellow-100 text-yellow-800' :
+                                            'bg-green-100 text-green-800'
+                                          }`}>
+                                            {comp.threatLevel}
+                                          </Badge>
+                                        </TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </TableBody>
+                                </Table>
+                                <Separator />
+                                <div>
+                                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Differentiation</p>
+                                  <p className="text-sm">{intelligenceReport.competitiveIntelligence.differentiation}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Market Positioning</p>
+                                  <p className="text-sm">{intelligenceReport.competitiveIntelligence.positioning}</p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Deal Strength Score */}
+                          <div className="space-y-2">
+                            <h3 className="text-base font-semibold">Deal Strength</h3>
+                            <div className="rounded-lg border border-border p-4 space-y-4">
+                              <div className="text-center">
+                                <span className="text-4xl font-bold">{intelligenceReport.dealStrengthScore.overall}</span>
+                                <span className="text-lg text-muted-foreground ml-1">/100</span>
+                              </div>
+                              <Progress value={intelligenceReport.dealStrengthScore.overall} className="h-3" />
+                              <div className="space-y-2 pt-1">
+                                {intelligenceReport.dealStrengthScore.breakdown.map((b) => (
+                                  <div key={b.dimension} className="space-y-1">
+                                    <div className="flex items-center justify-between text-sm">
+                                      <span>{b.dimension}</span>
+                                      <span className="font-medium">
+                                        {b.score} <span className="text-xs text-muted-foreground">(w: {Math.round(b.weight * 100)}%)</span>
+                                      </span>
+                                    </div>
+                                    <Progress value={b.score} className="h-1.5" />
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Question Coverage */}
+                          <div className="space-y-2">
+                            <h3 className="text-base font-semibold">Question Coverage</h3>
+                            <div className="rounded-lg border border-border p-4 space-y-4">
+                              <div className="flex items-center gap-3">
+                                <span className="text-2xl font-bold">{intelligenceReport.questionCoverage.overallCoveragePercent}%</span>
+                                <span className="text-sm text-muted-foreground">Overall Coverage</span>
+                              </div>
+                              <Progress value={intelligenceReport.questionCoverage.overallCoveragePercent} />
+                              {intelligenceReport.questionCoverage.areas.map((area) => (
+                                <div key={area.area} className="space-y-1.5">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-sm font-medium">{area.area}</span>
+                                    <span className="text-sm">{area.coveragePercent}%</span>
+                                  </div>
+                                  <Progress value={area.coveragePercent} className="h-1.5" />
+                                  {area.gaps.length > 0 && (
+                                    <div className="mt-1">
+                                      <p className="text-xs text-red-600 font-medium">Gaps:</p>
+                                      <ul className="text-xs text-muted-foreground list-disc list-inside">
+                                        {area.gaps.map((gap, i) => <li key={i}>{gap}</li>)}
+                                      </ul>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                              {intelligenceReport.questionCoverage.suggestedFollowUps.length > 0 && (
+                                <>
+                                  <Separator />
+                                  <div>
+                                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">Suggested Follow-Up Questions</p>
+                                    <ul className="text-sm space-y-1 list-disc list-inside">
+                                      {intelligenceReport.questionCoverage.suggestedFollowUps.map((q, i) => <li key={i}>{q}</li>)}
+                                    </ul>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* IC Memo */}
+                          <div className="space-y-2">
+                            <h3 className="text-base font-semibold">{intelligenceReport.icMemo.title}</h3>
+                            <div className="rounded-lg border border-border p-4 space-y-4">
+                              {intelligenceReport.icMemo.sections.map((section, i) => (
+                                <div key={i}>
+                                  {i > 0 && <Separator className="mb-4" />}
+                                  <h4 className="text-sm font-semibold mb-1">{section.heading}</h4>
+                                  <p className="text-sm leading-relaxed whitespace-pre-line">{section.content}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Transcript Annotations */}
+                          {intelligenceReport.transcriptAnnotations.length > 0 && (
+                            <div className="space-y-2">
+                              <h3 className="text-base font-semibold">Transcript Annotations</h3>
+                              <div className="rounded-lg border border-border p-4 space-y-3">
+                                {intelligenceReport.transcriptAnnotations.map((ann, i) => (
+                                  <div key={i} className="flex items-start gap-3">
+                                    <Badge className={`shrink-0 text-xs mt-0.5 ${
+                                      ann.type === 'risk' ? 'bg-red-100 text-red-700' :
+                                      ann.type === 'signal' ? 'bg-green-100 text-green-700' :
+                                      ann.type === 'metric' ? 'bg-blue-100 text-blue-700' :
+                                      'bg-purple-100 text-purple-700'
+                                    }`}>
+                                      {ann.type}
+                                    </Badge>
+                                    <div>
+                                      <p className="text-xs font-medium">{ann.label}</p>
+                                      <blockquote className="text-xs text-muted-foreground italic mt-0.5">"{ann.quote}"</blockquote>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </CollapsibleContent>
+                </Card>
+              </Collapsible>
+            )}
 
             <Card className="p-6">
               <div className="flex flex-col sm:flex-row gap-3 sm:justify-end">

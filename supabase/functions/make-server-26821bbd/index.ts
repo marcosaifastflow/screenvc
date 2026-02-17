@@ -1107,486 +1107,6 @@ const sendEmailViaResend = async ({
   };
 };
 
-// ========================================
-// MAILBOX OAUTH HELPERS (Gmail / Outlook)
-// ========================================
-
-type MailboxProvider = 'google' | 'microsoft';
-
-interface MailboxConnection {
-  user_id: string;
-  provider: MailboxProvider;
-  mailbox_email: string;
-  grant_id: string | null;
-  access_token: string | null;
-  refresh_token: string | null;
-  token_expires_at: string | null;
-  status: string;
-  last_synced_at: string | null;
-}
-
-const getMailboxConfig = () => ({
-  google: {
-    clientId: Deno.env.get('GOOGLE_OAUTH_CLIENT_ID') ?? '',
-    clientSecret: Deno.env.get('GOOGLE_OAUTH_CLIENT_SECRET') ?? '',
-  },
-  microsoft: {
-    clientId: Deno.env.get('MICROSOFT_OAUTH_CLIENT_ID') ?? '',
-    clientSecret: Deno.env.get('MICROSOFT_OAUTH_CLIENT_SECRET') ?? '',
-  },
-  redirectUri: `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1/make-server-26821bbd/communications/mailbox/callback`,
-  stateSecret: Deno.env.get('MAILBOX_STATE_SECRET') ?? '',
-  appBaseUrl: Deno.env.get('APP_BASE_URL') ?? '',
-});
-
-const mapMailboxProvider = (value: unknown): MailboxProvider =>
-  value === 'microsoft' ? 'microsoft' : 'google';
-
-const toBase64Url = (str: string) =>
-  btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-
-const fromBase64Url = (str: string) => {
-  let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  while (b64.length % 4 !== 0) b64 += '=';
-  return atob(b64);
-};
-
-const signMailboxState = async (payloadB64: string, secret: string) => {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payloadB64));
-  const sigBytes = new Uint8Array(signature);
-  let binary = '';
-  for (const byte of sigBytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-};
-
-const buildMailboxState = async ({
-  userId,
-  provider,
-  appBaseUrl,
-  secret,
-}: {
-  userId: string;
-  provider: MailboxProvider;
-  appBaseUrl: string;
-  secret: string;
-}) => {
-  const payload = {
-    userId,
-    provider,
-    appBaseUrl,
-    exp: Date.now() + 10 * 60 * 1000,
-  };
-  const payloadB64 = toBase64Url(JSON.stringify(payload));
-  const signature = await signMailboxState(payloadB64, secret);
-  return `${payloadB64}.${signature}`;
-};
-
-const parseMailboxState = async (state: string, secret: string) => {
-  const [payloadB64, signature] = state.split('.');
-  if (!payloadB64 || !signature) {
-    throw new Error('Invalid state.');
-  }
-  const expected = await signMailboxState(payloadB64, secret);
-  if (expected !== signature) {
-    throw new Error('State signature mismatch.');
-  }
-
-  const payload = JSON.parse(fromBase64Url(payloadB64)) as {
-    userId?: string;
-    provider?: MailboxProvider;
-    appBaseUrl?: string;
-    exp?: number;
-  };
-  if (!payload.userId || !payload.provider || !payload.exp || payload.exp < Date.now()) {
-    throw new Error('State expired or malformed.');
-  }
-  return payload as { userId: string; provider: MailboxProvider; appBaseUrl: string };
-};
-
-const getMailboxConnection = async (
-  db: ReturnType<typeof getServiceClient>,
-  userId: string,
-): Promise<MailboxConnection | null> => {
-  const { data, error } = await db
-    .from('user_mailbox_connections')
-    .select('*')
-    .eq('user_id', userId)
-    .maybeSingle();
-
-  if (error) {
-    const msg = error.message ?? '';
-    if (msg.includes('relation') || msg.includes('schema cache')) {
-      return null;
-    }
-    console.error('[MAILBOX CONNECTION] Error:', error);
-    return null;
-  }
-
-  return data as MailboxConnection | null;
-};
-
-const upsertMailboxConnection = async (
-  db: ReturnType<typeof getServiceClient>,
-  data: Partial<MailboxConnection> & { user_id: string },
-) => {
-  const { error } = await db
-    .from('user_mailbox_connections')
-    .upsert(
-      { ...data, updated_at: new Date().toISOString() },
-      { onConflict: 'user_id' },
-    );
-
-  if (error) {
-    console.error('[UPSERT MAILBOX CONNECTION] Error:', error);
-    throw error;
-  }
-};
-
-const refreshMailboxAccessToken = async (
-  db: ReturnType<typeof getServiceClient>,
-  connection: MailboxConnection,
-): Promise<string> => {
-  if (!connection.refresh_token) {
-    throw new Error('No refresh token available.');
-  }
-
-  const config = getMailboxConfig();
-  const providerConfig = connection.provider === 'microsoft' ? config.microsoft : config.google;
-
-  const tokenUrl = connection.provider === 'microsoft'
-    ? 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
-    : 'https://oauth2.googleapis.com/token';
-
-  const params = new URLSearchParams({
-    client_id: providerConfig.clientId,
-    client_secret: providerConfig.clientSecret,
-    refresh_token: connection.refresh_token,
-    grant_type: 'refresh_token',
-  });
-
-  const response = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error('[REFRESH TOKEN] Error:', response.status, errorBody);
-    throw new Error(`Token refresh failed (${response.status})`);
-  }
-
-  const tokenData = await response.json();
-  const accessToken = tokenData.access_token as string;
-  const expiresIn = typeof tokenData.expires_in === 'number' ? tokenData.expires_in : 3600;
-  const newRefreshToken = typeof tokenData.refresh_token === 'string'
-    ? tokenData.refresh_token
-    : connection.refresh_token;
-
-  await upsertMailboxConnection(db, {
-    user_id: connection.user_id,
-    access_token: accessToken,
-    refresh_token: newRefreshToken,
-    token_expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
-  });
-
-  return accessToken;
-};
-
-const getValidMailboxToken = async (
-  db: ReturnType<typeof getServiceClient>,
-  connection: MailboxConnection,
-): Promise<string> => {
-  if (
-    connection.access_token &&
-    connection.token_expires_at &&
-    new Date(connection.token_expires_at).getTime() > Date.now() + 60_000
-  ) {
-    return connection.access_token;
-  }
-  return refreshMailboxAccessToken(db, connection);
-};
-
-const sendEmailViaGmail = async (
-  accessToken: string,
-  { to, subject, body, from }: { to: string; subject: string; body: string; from: string },
-) => {
-  const mimeMessage = [
-    `From: ${from}`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/html; charset=UTF-8',
-    '',
-    body.split('\n').map((l) => l.trim()).join('<br />'),
-  ].join('\r\n');
-
-  const raw = toBase64Url(mimeMessage);
-
-  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ raw }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error('[GMAIL SEND] Error:', response.status, errorBody);
-    return {
-      success: false,
-      error: `Gmail API error (${response.status})`,
-      providerMessageId: null as string | null,
-    };
-  }
-
-  const result = await response.json();
-  return {
-    success: true,
-    error: null as string | null,
-    providerMessageId: typeof result.id === 'string' ? result.id : null,
-  };
-};
-
-const sendEmailViaMicrosoft = async (
-  accessToken: string,
-  { to, subject, body }: { to: string; subject: string; body: string },
-) => {
-  const html = body.split('\n').map((l) => l.trim()).join('<br />');
-
-  const response = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      message: {
-        subject,
-        body: { contentType: 'HTML', content: html },
-        toRecipients: [{ emailAddress: { address: to } }],
-      },
-    }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error('[MICROSOFT SEND] Error:', response.status, errorBody);
-    return {
-      success: false,
-      error: `Microsoft Graph API error (${response.status})`,
-      providerMessageId: null as string | null,
-    };
-  }
-
-  return {
-    success: true,
-    error: null as string | null,
-    providerMessageId: null as string | null,
-  };
-};
-
-const sendEmailViaProvider = async ({
-  db,
-  userId,
-  to,
-  subject,
-  body,
-  replyTo,
-}: {
-  db: ReturnType<typeof getServiceClient>;
-  userId: string;
-  to: string;
-  subject: string;
-  body: string;
-  replyTo?: string;
-}): Promise<{ success: boolean; error: string | null; providerMessageId: string | null }> => {
-  const connection = await getMailboxConnection(db, userId);
-
-  if (connection && connection.status === 'connected' && connection.refresh_token) {
-    try {
-      const accessToken = await getValidMailboxToken(db, connection);
-
-      if (connection.provider === 'microsoft') {
-        return sendEmailViaMicrosoft(accessToken, { to, subject, body });
-      }
-
-      return sendEmailViaGmail(accessToken, {
-        to,
-        subject,
-        body,
-        from: connection.mailbox_email,
-      });
-    } catch (err) {
-      console.error('[SEND VIA PROVIDER] OAuth send failed, falling back to Resend:', err);
-    }
-  }
-
-  return sendEmailViaResend({ to, subject, body, replyTo });
-};
-
-const syncMailboxMessages = async (
-  db: ReturnType<typeof getServiceClient>,
-  userId: string,
-  connection: MailboxConnection,
-) => {
-  const accessToken = await getValidMailboxToken(db, connection);
-
-  if (connection.provider === 'google') {
-    const listResponse = await fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=in:inbox',
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    );
-
-    if (!listResponse.ok) {
-      console.error('[GMAIL SYNC] List error:', listResponse.status);
-      return;
-    }
-
-    const listData = await listResponse.json();
-    const messageRefs = Array.isArray(listData.messages) ? listData.messages : [];
-
-    for (const ref of messageRefs.slice(0, 20)) {
-      const msgId = typeof ref.id === 'string' ? ref.id : '';
-      if (!msgId) continue;
-
-      const { data: existingRow } = await db
-        .from('application_emails')
-        .select('id')
-        .eq('provider_message_id', msgId)
-        .eq('owner_user_id', userId)
-        .maybeSingle();
-
-      if (existingRow) continue;
-
-      const msgResponse = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}?format=full`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
-      );
-
-      if (!msgResponse.ok) continue;
-
-      const msgData = await msgResponse.json();
-      const headers = Array.isArray(msgData.payload?.headers) ? msgData.payload.headers : [];
-      const getHeader = (name: string) => {
-        const h = headers.find((hdr: { name: string; value: string }) =>
-          hdr.name.toLowerCase() === name.toLowerCase(),
-        );
-        return h ? String(h.value) : '';
-      };
-
-      const fromHeader = getHeader('From');
-      const toHeader = getHeader('To');
-      const subjectHeader = getHeader('Subject');
-      const dateHeader = getHeader('Date');
-      const threadIdHeader = msgData.threadId ?? '';
-
-      let bodyText = '';
-      const extractBody = (part: Record<string, unknown>): string => {
-        if (part.mimeType === 'text/plain' && typeof part.body === 'object' && part.body !== null) {
-          const bodyObj = part.body as Record<string, unknown>;
-          if (typeof bodyObj.data === 'string') {
-            try {
-              return fromBase64Url(bodyObj.data);
-            } catch {
-              return '';
-            }
-          }
-        }
-        if (Array.isArray(part.parts)) {
-          for (const sub of part.parts) {
-            const text = extractBody(sub as Record<string, unknown>);
-            if (text) return text;
-          }
-        }
-        return '';
-      };
-      bodyText = extractBody(msgData.payload ?? {});
-
-      const fromEmail = fromHeader.match(/<([^>]+)>/)?.[1] ?? fromHeader;
-      const isInbound = fromEmail.toLowerCase() !== connection.mailbox_email.toLowerCase();
-
-      await insertRowWithFallback(db, 'application_emails', {
-        owner_user_id: userId,
-        thread_id: `gmail_${threadIdHeader}`,
-        startup_email: isInbound ? fromEmail : toHeader.match(/<([^>]+)>/)?.[1] ?? toHeader,
-        vc_email: connection.mailbox_email,
-        direction: isInbound ? 'inbound' : 'outbound',
-        subject: subjectHeader,
-        body: bodyText,
-        provider_status: isInbound ? 'received' : 'sent',
-        provider_message_id: msgId,
-        created_at: dateHeader ? new Date(dateHeader).toISOString() : new Date().toISOString(),
-      });
-    }
-  } else if (connection.provider === 'microsoft') {
-    const listResponse = await fetch(
-      'https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime desc&$select=id,subject,from,toRecipients,body,receivedDateTime,conversationId',
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    );
-
-    if (!listResponse.ok) {
-      console.error('[MICROSOFT SYNC] List error:', listResponse.status);
-      return;
-    }
-
-    const listData = await listResponse.json();
-    const messages = Array.isArray(listData.value) ? listData.value : [];
-
-    for (const msg of messages) {
-      const msgId = typeof msg.id === 'string' ? msg.id : '';
-      if (!msgId) continue;
-
-      const { data: existingRow } = await db
-        .from('application_emails')
-        .select('id')
-        .eq('provider_message_id', msgId)
-        .eq('owner_user_id', userId)
-        .maybeSingle();
-
-      if (existingRow) continue;
-
-      const fromEmail = msg.from?.emailAddress?.address ?? '';
-      const toEmail = msg.toRecipients?.[0]?.emailAddress?.address ?? '';
-      const subjectText = typeof msg.subject === 'string' ? msg.subject : '';
-      const bodyContent = msg.body?.content ?? '';
-      const conversationId = typeof msg.conversationId === 'string' ? msg.conversationId : '';
-      const receivedAt = typeof msg.receivedDateTime === 'string' ? msg.receivedDateTime : new Date().toISOString();
-
-      const isInbound = fromEmail.toLowerCase() !== connection.mailbox_email.toLowerCase();
-
-      await insertRowWithFallback(db, 'application_emails', {
-        owner_user_id: userId,
-        thread_id: `msft_${conversationId}`,
-        startup_email: isInbound ? fromEmail : toEmail,
-        vc_email: connection.mailbox_email,
-        direction: isInbound ? 'inbound' : 'outbound',
-        subject: subjectText,
-        body: bodyContent,
-        provider_status: isInbound ? 'received' : 'sent',
-        provider_message_id: msgId,
-        created_at: receivedAt,
-      });
-    }
-  }
-
-  await upsertMailboxConnection(db, {
-    user_id: userId,
-    last_synced_at: new Date().toISOString(),
-  });
-};
-
 const base64UrlEncode = (value: string | Uint8Array) => {
   const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
   let binary = '';
@@ -1697,7 +1217,6 @@ const scheduleGoogleMeetEvent = async ({
   startDateTime,
   endDateTime,
   timeZone,
-  userAccessToken,
 }: {
   summary: string;
   description: string;
@@ -1706,27 +1225,19 @@ const scheduleGoogleMeetEvent = async ({
   startDateTime: string;
   endDateTime: string;
   timeZone: string;
-  userAccessToken?: string;
 }) => {
-  let accessToken: string;
-
-  if (userAccessToken) {
-    accessToken = userAccessToken;
-  } else {
-    const tokenResult = await getGoogleCalendarAccessToken();
-    if (!tokenResult.success) {
-      return { success: false, error: tokenResult.error, meetLink: '', eventId: '' };
-    }
-    accessToken = tokenResult.accessToken;
+  const tokenResult = await getGoogleCalendarAccessToken();
+  if (!tokenResult.success) {
+    return { success: false, error: tokenResult.error, meetLink: '', eventId: '' };
   }
 
-  const calendarId = userAccessToken ? 'primary' : encodeURIComponent(Deno.env.get('GOOGLE_CALENDAR_ID') ?? 'primary');
+  const calendarId = encodeURIComponent(Deno.env.get('GOOGLE_CALENDAR_ID') ?? 'primary');
   const createEventResponse = await fetch(
     `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?conferenceDataVersion=1&sendUpdates=all`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${tokenResult.accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -1792,6 +1303,15 @@ const getLinkedVcEmail = async (
 ) => {
   const fallbackEmail = typeof user.email === 'string' ? user.email : '';
 
+  const mailboxConnection = await getMailboxConnection(db, user.id);
+  if (mailboxConnection?.mailbox_email) {
+    return {
+      email: mailboxConnection.mailbox_email,
+      displayName: '',
+      linked: true,
+    };
+  }
+
   const linked = await db
     .from('vc_email_accounts')
     .select('*')
@@ -1820,6 +1340,329 @@ const getLinkedVcEmail = async (
   }
 
   return { email: fallbackEmail, displayName, linked: false };
+};
+
+type MailboxProvider = 'google' | 'microsoft';
+
+interface MailboxConnection {
+  user_id: string;
+  provider: MailboxProvider;
+  mailbox_email: string;
+  grant_id: string;
+  access_token?: string | null;
+  refresh_token?: string | null;
+  token_expires_at?: string | null;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+const getMailboxConfig = () => ({
+  apiBase: Deno.env.get('MAILBOX_API_BASE') ?? 'https://api.us.nylas.com',
+  clientId: Deno.env.get('MAILBOX_CLIENT_ID') ?? '',
+  clientSecret: Deno.env.get('MAILBOX_CLIENT_SECRET') ?? '',
+  redirectUri:
+    Deno.env.get('MAILBOX_REDIRECT_URI') ??
+    `${Deno.env.get('SUPABASE_URL') ?? ''}/functions/v1/make-server-26821bbd/communications/mailbox/callback`,
+  stateSecret: Deno.env.get('MAILBOX_STATE_SECRET') ?? '',
+  appBaseUrl: Deno.env.get('APP_BASE_URL') ?? 'http://localhost:5173',
+});
+
+const mapMailboxProvider = (value: string | null): MailboxProvider => {
+  if (value === 'outlook' || value === 'microsoft') {
+    return 'microsoft';
+  }
+  return 'google';
+};
+
+const toBase64Url = (input: string) =>
+  btoa(input).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+const fromBase64Url = (input: string) => {
+  const padded = input.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(input.length / 4) * 4, '=');
+  return atob(padded);
+};
+
+const signMailboxState = async (payloadB64: string, secret: string) => {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payloadB64));
+  return base64UrlEncode(new Uint8Array(signature));
+};
+
+const buildMailboxState = async ({
+  userId,
+  provider,
+  appBaseUrl,
+  secret,
+}: {
+  userId: string;
+  provider: MailboxProvider;
+  appBaseUrl: string;
+  secret: string;
+}) => {
+  const payload = {
+    userId,
+    provider,
+    appBaseUrl,
+    exp: Date.now() + 10 * 60 * 1000,
+  };
+  const payloadB64 = toBase64Url(JSON.stringify(payload));
+  const signature = await signMailboxState(payloadB64, secret);
+  return `${payloadB64}.${signature}`;
+};
+
+const parseMailboxState = async (state: string, secret: string) => {
+  const [payloadB64, signature] = state.split('.');
+  if (!payloadB64 || !signature) {
+    throw new Error('Invalid state.');
+  }
+  const expected = await signMailboxState(payloadB64, secret);
+  if (expected !== signature) {
+    throw new Error('State signature mismatch.');
+  }
+
+  const payload = JSON.parse(fromBase64Url(payloadB64)) as {
+    userId?: string;
+    provider?: MailboxProvider;
+    appBaseUrl?: string;
+    exp?: number;
+  };
+  if (!payload.userId || !payload.provider || !payload.exp || payload.exp < Date.now()) {
+    throw new Error('State expired or malformed.');
+  }
+  return payload;
+};
+
+const getMailboxConnection = async (
+  db: ReturnType<typeof getServiceClient>,
+  userId: string,
+) => {
+  const { data, error } = await db
+    .from('user_mailbox_connections')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'connected')
+    .maybeSingle();
+
+  if (error) {
+    const message = error.message ?? '';
+    if (message.includes('relation') || message.includes('schema cache') || message.includes('column')) {
+      return null;
+    }
+    throw error;
+  }
+
+  return (data as MailboxConnection | null) ?? null;
+};
+
+const upsertMailboxConnection = async (
+  db: ReturnType<typeof getServiceClient>,
+  payload: Record<string, unknown>,
+) => {
+  await upsertRowWithFallback(db, 'user_mailbox_connections', payload, 'user_id');
+};
+
+const callMailboxApi = async (
+  path: string,
+  options: {
+    method?: string;
+    body?: Record<string, unknown>;
+    query?: Record<string, string>;
+  },
+) => {
+  const config = getMailboxConfig();
+  const apiKey = config.clientSecret;
+  if (!apiKey) {
+    return { ok: false, status: 500, error: 'Mailbox provider is not configured (missing MAILBOX_CLIENT_SECRET).' } as const;
+  }
+
+  const url = new URL(`${config.apiBase}${path}`);
+  Object.entries(options.query ?? {}).forEach(([key, value]) => {
+    if (value) {
+      url.searchParams.set(key, value);
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    method: options.method ?? 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  const text = await response.text();
+  let json: Record<string, unknown> = {};
+  try {
+    json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    json = {};
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error:
+        typeof json.message === 'string'
+          ? json.message
+          : typeof json.error === 'string'
+            ? json.error
+            : `Mailbox provider request failed (${response.status})`,
+      json,
+    } as const;
+  }
+
+  return { ok: true, status: response.status, json } as const;
+};
+
+const sendEmailViaMailboxConnection = async ({
+  connection,
+  to,
+  subject,
+  body,
+  replyTo,
+}: {
+  connection: MailboxConnection;
+  to: string;
+  subject: string;
+  body: string;
+  replyTo?: string;
+}) => {
+  const result = await callMailboxApi(`/v3/grants/${connection.grant_id}/messages/send`, {
+    method: 'POST',
+    body: {
+      subject,
+      body,
+      to: [{ email: to }],
+      from: [{ email: connection.mailbox_email }],
+      reply_to: replyTo ? [{ email: replyTo }] : undefined,
+    },
+  });
+
+  if (!result.ok) {
+    return {
+      success: false,
+      error: result.error,
+      providerMessageId: null as string | null,
+      providerThreadId: null as string | null,
+    };
+  }
+
+  const payload = result.json;
+  const root = (payload.data as Record<string, unknown> | undefined) ?? payload;
+
+  return {
+    success: true,
+    error: null as string | null,
+    providerMessageId:
+      typeof root.id === 'string'
+        ? root.id
+        : typeof payload.id === 'string'
+          ? payload.id
+          : null,
+    providerThreadId:
+      typeof root.thread_id === 'string'
+        ? root.thread_id
+        : typeof root.threadId === 'string'
+          ? root.threadId
+          : null,
+  };
+};
+
+const syncMailboxMessages = async (
+  db: ReturnType<typeof getServiceClient>,
+  userId: string,
+  connection: MailboxConnection,
+) => {
+  const query: Record<string, string> = { limit: '30' };
+  const result = await callMailboxApi(`/v3/grants/${connection.grant_id}/messages`, { query });
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+
+  const rawData = Array.isArray(result.json.data)
+    ? (result.json.data as Record<string, unknown>[])
+    : [];
+
+  for (const message of rawData) {
+    const providerMessageId =
+      typeof message.id === 'string' ? message.id : '';
+    if (!providerMessageId) continue;
+
+    const existing = await db
+      .from('application_emails')
+      .select('id')
+      .eq('owner_user_id', userId)
+      .eq('provider_message_id', providerMessageId)
+      .maybeSingle();
+    if (!existing.error && existing.data) {
+      continue;
+    }
+
+    const fromList = Array.isArray(message.from) ? (message.from as Record<string, unknown>[]) : [];
+    const toList = Array.isArray(message.to) ? (message.to as Record<string, unknown>[]) : [];
+    const fromEmail = typeof fromList[0]?.email === 'string' ? String(fromList[0].email) : '';
+    const toEmail = typeof toList[0]?.email === 'string' ? String(toList[0].email) : '';
+    const inbound = fromEmail.toLowerCase() !== connection.mailbox_email.toLowerCase();
+    const providerThreadId =
+      typeof message.thread_id === 'string'
+        ? message.thread_id
+        : typeof message.threadId === 'string'
+          ? message.threadId
+          : providerMessageId;
+    const threadId = `mailbox:${providerThreadId}`;
+
+    const createdAtRaw =
+      typeof message.date === 'string'
+        ? message.date
+        : typeof message.received_at === 'string'
+          ? message.received_at
+          : new Date().toISOString();
+
+    await insertRowWithFallback(db, 'application_emails', {
+      owner_user_id: userId,
+      thread_id: threadId,
+      form_external_id: null,
+      submission_external_id: null,
+      company_name: 'Startup',
+      startup_email: inbound ? fromEmail : toEmail,
+      vc_email: inbound ? toEmail || connection.mailbox_email : fromEmail || connection.mailbox_email,
+      direction: inbound ? 'inbound' : 'outbound',
+      subject: typeof message.subject === 'string' ? message.subject : '(No subject)',
+      body:
+        typeof message.body === 'string'
+          ? message.body
+          : typeof message.snippet === 'string'
+            ? message.snippet
+            : '',
+      provider_status: 'synced',
+      provider_message_id: providerMessageId,
+      in_reply_to: typeof message.in_reply_to === 'string' ? message.in_reply_to : null,
+      created_at: createdAtRaw,
+    });
+  }
+
+  await upsertMailboxConnection(db, {
+    user_id: userId,
+    provider: connection.provider,
+    mailbox_email: connection.mailbox_email,
+    grant_id: connection.grant_id,
+    access_token: connection.access_token ?? null,
+    refresh_token: connection.refresh_token ?? null,
+    token_expires_at: connection.token_expires_at ?? null,
+    status: 'connected',
+    last_synced_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    created_at: connection.created_at ?? new Date().toISOString(),
+  });
 };
 
 const extractMissingColumnName = (message: string, table: string) => {
@@ -2233,6 +2076,93 @@ const getFavoriteExternalSubmissionIds = async (
       }
       return String(row.id);
     });
+};
+
+const exchangeMailboxAuthorizationCode = async (code: string) => {
+  const config = getMailboxConfig();
+  if (!config.clientId || !config.clientSecret) {
+    return {
+      success: false,
+      error: 'Mailbox OAuth is not configured. Missing MAILBOX_CLIENT_ID/MAILBOX_CLIENT_SECRET.',
+    } as const;
+  }
+
+  const response = await fetch(`${config.apiBase}/v3/connect/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: config.redirectUri,
+    }),
+  });
+
+  const raw = await response.text();
+  let json: Record<string, unknown> = {};
+  try {
+    json = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  } catch {
+    json = {};
+  }
+
+  if (!response.ok) {
+    return {
+      success: false,
+      error:
+        typeof json.message === 'string'
+          ? json.message
+          : typeof json.error === 'string'
+            ? json.error
+            : `Mailbox token exchange failed (${response.status}).`,
+    } as const;
+  }
+
+  const grantId =
+    typeof json.grant_id === 'string'
+      ? json.grant_id
+      : typeof json.grantId === 'string'
+        ? json.grantId
+        : '';
+  const email =
+    typeof json.email === 'string'
+      ? json.email
+      : typeof json.grant_email === 'string'
+        ? json.grant_email
+        : '';
+  const providerValue =
+    typeof json.provider === 'string'
+      ? json.provider
+      : 'google';
+
+  if (!grantId || !email) {
+    return {
+      success: false,
+      error: 'Mailbox provider response is missing grant or email.',
+    } as const;
+  }
+
+  return {
+    success: true,
+    connection: {
+      grantId,
+      email,
+      provider: mapMailboxProvider(providerValue),
+      accessToken:
+        typeof json.access_token === 'string'
+          ? json.access_token
+          : null,
+      refreshToken:
+        typeof json.refresh_token === 'string'
+          ? json.refresh_token
+          : null,
+      expiresIn:
+        typeof json.expires_in === 'number'
+          ? json.expires_in
+          : null,
+    },
+  } as const;
 };
 
 // Enable logger
@@ -2883,6 +2813,191 @@ app.post("/make-server-26821bbd/forms/:formId/submissions/:submissionId/final-co
   }
 });
 
+// Mailbox connection status - REQUIRES AUTH
+app.get("/make-server-26821bbd/communications/mailbox/status", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const db = getServiceClient();
+    const mailboxConnection = await getMailboxConnection(db, user.id);
+
+    return c.json({
+      success: true,
+      connected: Boolean(mailboxConnection),
+      provider: mailboxConnection?.provider ?? null,
+      email: mailboxConnection?.mailbox_email ?? '',
+      fallbackEmail: typeof user.email === 'string' ? user.email : '',
+      lastSyncedAt:
+        mailboxConnection && typeof (mailboxConnection as Record<string, unknown>).last_synced_at === 'string'
+          ? String((mailboxConnection as Record<string, unknown>).last_synced_at)
+          : null,
+    });
+  } catch (error) {
+    console.error('[MAILBOX STATUS] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Create OAuth connect URL for mailbox provider - REQUIRES AUTH
+app.get("/make-server-26821bbd/communications/mailbox/connect-url", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const provider = mapMailboxProvider(c.req.query('provider'));
+    const config = getMailboxConfig();
+    if (!config.clientId || !config.clientSecret || !config.redirectUri || !config.stateSecret) {
+      return c.json({
+        success: false,
+        error: 'Mailbox OAuth is not configured. Set MAILBOX_CLIENT_ID, MAILBOX_CLIENT_SECRET, MAILBOX_REDIRECT_URI, and MAILBOX_STATE_SECRET.',
+      }, 500);
+    }
+
+    const state = await buildMailboxState({
+      userId: user.id,
+      provider,
+      appBaseUrl: config.appBaseUrl,
+      secret: config.stateSecret,
+    });
+
+    const url = new URL(`${config.apiBase}/v3/connect/auth`);
+    url.searchParams.set('client_id', config.clientId);
+    url.searchParams.set('provider', provider);
+    url.searchParams.set('redirect_uri', config.redirectUri);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('state', state);
+
+    return c.json({ success: true, url: url.toString() });
+  } catch (error) {
+    console.error('[MAILBOX CONNECT URL] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// OAuth callback for mailbox connection
+app.get("/make-server-26821bbd/communications/mailbox/callback", async (c) => {
+  const config = getMailboxConfig();
+  const appBaseUrl = config.appBaseUrl || 'http://localhost:5173';
+  const redirectWithStatus = (status: 'connected' | 'error', message?: string) => {
+    const redirectUrl = new URL(appBaseUrl);
+    redirectUrl.searchParams.set('view', 'hub');
+    redirectUrl.searchParams.set('mailbox', status);
+    if (message) {
+      redirectUrl.searchParams.set('mailbox_error', message.slice(0, 180));
+    }
+    return c.redirect(redirectUrl.toString());
+  };
+
+  try {
+    const stateParam = c.req.query('state');
+    const codeParam = c.req.query('code');
+    const oauthError = c.req.query('error');
+
+    if (oauthError) {
+      return redirectWithStatus('error', oauthError);
+    }
+    if (!stateParam || !codeParam) {
+      return redirectWithStatus('error', 'Missing OAuth state/code');
+    }
+    if (!config.stateSecret) {
+      return redirectWithStatus('error', 'Mailbox state secret is not configured');
+    }
+
+    const parsedState = await parseMailboxState(stateParam, config.stateSecret);
+    const exchangeResult = await exchangeMailboxAuthorizationCode(codeParam);
+    if (!exchangeResult.success) {
+      return redirectWithStatus('error', exchangeResult.error);
+    }
+
+    const db = getServiceClient();
+    const expiresAt = exchangeResult.connection.expiresIn
+      ? new Date(Date.now() + exchangeResult.connection.expiresIn * 1000).toISOString()
+      : null;
+
+    await upsertMailboxConnection(db, {
+      user_id: parsedState.userId,
+      provider: exchangeResult.connection.provider,
+      mailbox_email: exchangeResult.connection.email.toLowerCase(),
+      grant_id: exchangeResult.connection.grantId,
+      access_token: exchangeResult.connection.accessToken,
+      refresh_token: exchangeResult.connection.refreshToken,
+      token_expires_at: expiresAt,
+      status: 'connected',
+      updated_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+
+    await upsertTableRowWithFallback(db, 'vc_email_accounts', {
+      user_id: parsedState.userId,
+      linked_email: exchangeResult.connection.email.toLowerCase(),
+      provider: 'mailbox',
+      updated_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+
+    return redirectWithStatus('connected');
+  } catch (error) {
+    console.error('[MAILBOX CALLBACK] Error:', error);
+    return redirectWithStatus('error', String(error));
+  }
+});
+
+// Disconnect mailbox provider - REQUIRES AUTH
+app.post("/make-server-26821bbd/communications/mailbox/disconnect", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const db = getServiceClient();
+    const connection = await getMailboxConnection(db, user.id);
+    if (connection) {
+      await callMailboxApi(`/v3/grants/${connection.grant_id}`, { method: 'DELETE' });
+    }
+
+    const { error } = await db.from('user_mailbox_connections').delete().eq('user_id', user.id);
+    if (error) {
+      const message = error.message ?? '';
+      if (!message.includes('relation') && !message.includes('schema cache')) {
+        return c.json({ success: false, error: error.message }, 500);
+      }
+    }
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('[MAILBOX DISCONNECT] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Manually sync inbox messages from mailbox provider - REQUIRES AUTH
+app.post("/make-server-26821bbd/communications/mailbox/sync", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const db = getServiceClient();
+    const connection = await getMailboxConnection(db, user.id);
+    if (!connection) {
+      return c.json({ success: false, error: 'No connected mailbox found.' }, 400);
+    }
+
+    await syncMailboxMessages(db, user.id, connection);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('[MAILBOX SYNC] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
 // Generate AI email draft from final conclusion - REQUIRES AUTH
 app.post("/make-server-26821bbd/forms/:formId/submissions/:submissionId/email/generate", async (c) => {
   try {
@@ -3057,18 +3172,29 @@ app.post("/make-server-26821bbd/forms/:formId/submissions/:submissionId/email/se
         ? threadId
         : `thread_${context.externalSubmissionId}`;
 
-    const sendResult = await sendEmailViaProvider({
-      db,
-      userId: user.id,
-      to: context.startupEmail,
-      subject: subject.trim(),
-      body: body.trim(),
-      replyTo: senderEmail,
-    });
+    const mailboxConnection = await getMailboxConnection(db, user.id);
+    const sendResult = mailboxConnection
+      ? await sendEmailViaMailboxConnection({
+          connection: mailboxConnection,
+          to: context.startupEmail,
+          subject: subject.trim(),
+          body: body.trim(),
+          replyTo: senderEmail,
+        })
+      : await sendEmailViaResend({
+          to: context.startupEmail,
+          subject: subject.trim(),
+          body: body.trim(),
+          replyTo: senderEmail,
+        });
+
+    const persistedThreadId = sendResult.providerThreadId
+      ? `mailbox:${sendResult.providerThreadId}`
+      : resolvedThreadId;
 
     await insertRowWithFallback(db, 'application_emails', {
       owner_user_id: user.id,
-      thread_id: resolvedThreadId,
+      thread_id: persistedThreadId,
       form_external_id: context.externalFormId,
       submission_external_id: context.externalSubmissionId,
       company_name: context.companyName,
@@ -3088,7 +3214,7 @@ app.post("/make-server-26821bbd/forms/:formId/submissions/:submissionId/email/se
 
     return c.json({
       success: true,
-      threadId: resolvedThreadId,
+      threadId: persistedThreadId,
       toEmail: context.startupEmail,
       providerMessageId: sendResult.providerMessageId,
     });
@@ -3107,6 +3233,18 @@ app.get("/make-server-26821bbd/communications/emails", async (c) => {
     }
 
     const db = getServiceClient();
+    const syncRequested = c.req.query('sync');
+    if (syncRequested === '1' || syncRequested === 'true') {
+      const connection = await getMailboxConnection(db, user.id);
+      if (connection) {
+        try {
+          await syncMailboxMessages(db, user.id, connection);
+        } catch (syncError) {
+          console.error('[GET EMAIL THREADS][SYNC ERROR]', syncError);
+        }
+      }
+    }
+
     const { data, error } = await db
       .from('application_emails')
       .select('*')
@@ -3214,7 +3352,6 @@ app.post("/make-server-26821bbd/communications/emails/:threadId/reply", async (c
     if (typeof subject !== 'string' || !subject.trim() || typeof body !== 'string' || !body.trim()) {
       return c.json({ success: false, error: 'Subject and body are required.' }, 400);
     }
-
     const db = getServiceClient();
     const linkedVcEmail = await getLinkedVcEmail(db, user);
     const senderEmail = linkedVcEmail.email.trim();
@@ -3224,7 +3361,6 @@ app.post("/make-server-26821bbd/communications/emails/:threadId/reply", async (c
         error: 'No linked sender email. Link your email in VC Hub before replying.',
       }, 400);
     }
-
     const { data: existing, error: existingError } = await db
       .from('application_emails')
       .select('*')
@@ -3246,14 +3382,21 @@ app.post("/make-server-26821bbd/communications/emails/:threadId/reply", async (c
       return c.json({ success: false, error: 'Startup email not found for thread.' }, 400);
     }
 
-    const sendResult = await sendEmailViaProvider({
-      db,
-      userId: user.id,
-      to: startupEmail,
-      subject: subject.trim(),
-      body: body.trim(),
-      replyTo: senderEmail,
-    });
+    const mailboxConnection = await getMailboxConnection(db, user.id);
+    const sendResult = mailboxConnection
+      ? await sendEmailViaMailboxConnection({
+          connection: mailboxConnection,
+          to: startupEmail,
+          subject: subject.trim(),
+          body: body.trim(),
+          replyTo: senderEmail,
+        })
+      : await sendEmailViaResend({
+          to: startupEmail,
+          subject: subject.trim(),
+          body: body.trim(),
+          replyTo: senderEmail,
+        });
 
     await insertRowWithFallback(db, 'application_emails', {
       owner_user_id: user.id,
@@ -3393,17 +3536,6 @@ app.post("/make-server-26821bbd/forms/:formId/submissions/:submissionId/calls/sc
       return c.json({ success: false, error: 'Startup email is missing in this application.' }, 400);
     }
 
-    // Try to use the user's OAuth token for Calendar access
-    let userCalendarToken: string | undefined;
-    const mailboxConn = await getMailboxConnection(db, user.id);
-    if (mailboxConn && mailboxConn.provider === 'google' && mailboxConn.status === 'connected') {
-      try {
-        userCalendarToken = await getValidMailboxToken(db, mailboxConn);
-      } catch (err) {
-        console.error('[SCHEDULE CALL] Could not get user OAuth token, will try service account:', err);
-      }
-    }
-
     const scheduleResult = await scheduleGoogleMeetEvent({
       summary: `Intro Call - ${context.companyName}`,
       description:
@@ -3415,7 +3547,6 @@ app.post("/make-server-26821bbd/forms/:formId/submissions/:submissionId/calls/sc
       startDateTime,
       endDateTime,
       timeZone: timezone,
-      userAccessToken: userCalendarToken,
     });
 
     if (!scheduleResult.success) {
@@ -3873,424 +4004,59 @@ app.post("/make-server-26821bbd/notetaker/webhook", async (c) => {
   }
 });
 
-// Get favorite submissions for the authenticated VC on a form
-app.get("/make-server-26821bbd/forms/:formId/favorites", async (c) => {
-  try {
-    const user = await getUserFromRequest(c);
-    if (!user) {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
-
-    const formId = c.req.param('formId');
-    const db = getServiceClient();
-    const form = await getFormByExternalId(db, formId);
-    if (!form) {
-      return c.json({ success: false, error: 'Form not found' }, 404);
-    }
-    if (!isOwner(form, user.id)) {
-      return c.json({ success: false, error: 'Forbidden' }, 403);
-    }
-
-    const favorites = await getFavoriteExternalSubmissionIds(db, user.id, form);
-    return c.json({ success: true, favorites });
-  } catch (error) {
-    console.error('[GET FAVORITES] Error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
-  }
-});
-
-// Toggle favorite state for a submission
-app.post("/make-server-26821bbd/forms/:formId/favorites/toggle", async (c) => {
-  try {
-    const user = await getUserFromRequest(c);
-    if (!user) {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
-
-    const formId = c.req.param('formId');
-    const { submissionId } = await c.req.json();
-    if (!submissionId || typeof submissionId !== 'string') {
-      return c.json({ success: false, error: 'submissionId is required' }, 400);
-    }
-
-    const db = getServiceClient();
-    const form = await getFormByExternalId(db, formId);
-    if (!form) {
-      return c.json({ success: false, error: 'Form not found' }, 404);
-    }
-    if (!isOwner(form, user.id)) {
-      return c.json({ success: false, error: 'Forbidden' }, 403);
-    }
-
-    const submissions = await getSubmissionsForForm(db, form);
-    const targetSubmission = submissions.find((row) => {
-      const external = typeof row.external_submission_id === 'string' ? row.external_submission_id : '';
-      const legacy = typeof row.submission_id === 'string' ? row.submission_id : '';
-      const internal = String(row.id ?? '');
-      return external === submissionId || legacy === submissionId || internal === submissionId;
-    });
-
-    if (!targetSubmission) {
-      return c.json({ success: false, error: 'Submission not found' }, 404);
-    }
-
-    const favoriteCandidateIds = Array.from(
-      new Set(
-        [
-          typeof targetSubmission.id === 'string' ? targetSubmission.id : '',
-          typeof targetSubmission.external_submission_id === 'string' ? targetSubmission.external_submission_id : '',
-          typeof targetSubmission.submission_id === 'string' ? targetSubmission.submission_id : '',
-          submissionId,
-        ].filter((value) => value.trim().length > 0),
-      ),
-    );
-
-    const existing = await db
-      .from('submission_favorites')
-      .select('submission_id')
-      .eq('user_id', user.id);
-
-    if (existing.error) {
-      return c.json({ success: false, error: existing.error.message }, 500);
-    }
-
-    const favoriteSet = new Set(
-      ((existing.data as Record<string, unknown>[] | null) ?? [])
-        .map((row) => String(row.submission_id ?? '').trim())
-        .filter((value) => value.length > 0),
-    );
-    const currentlyFavorite = favoriteCandidateIds.some((id) => favoriteSet.has(id));
-
-    let isFavorite = currentlyFavorite;
-    if (currentlyFavorite) {
-      for (const candidateId of favoriteCandidateIds) {
-        const { error: deleteError } = await db
-          .from('submission_favorites')
-          .delete()
-          .eq('user_id', user.id)
-          .eq('submission_id', candidateId);
-
-        if (deleteError) {
-          const message = deleteError.message ?? '';
-          if (!message.includes('invalid input syntax for type uuid')) {
-            return c.json({ success: false, error: deleteError.message }, 500);
-          }
-        }
-      }
-      isFavorite = false;
-    } else {
-      let inserted = false;
-      let insertError: string | null = null;
-
-      for (const candidateId of favoriteCandidateIds) {
-        try {
-          await insertRowWithFallback(db, 'submission_favorites', {
-            user_id: user.id,
-            submission_id: candidateId,
-            created_at: new Date().toISOString(),
-          });
-          inserted = true;
-          break;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          insertError = message;
-          if (
-            message.includes('invalid input syntax for type uuid') ||
-            message.includes('violates foreign key constraint')
-          ) {
-            continue;
-          }
-          return c.json({ success: false, error: message }, 500);
-        }
-      }
-
-      if (!inserted) {
-        return c.json({
-          success: false,
-          error: insertError ?? 'Failed to save favourite submission',
-        }, 500);
-      }
-
-      isFavorite = true;
-    }
-
-    const favorites = await getFavoriteExternalSubmissionIds(db, user.id, form);
-    return c.json({
-      success: true,
-      favorites,
-      isFavorite,
-    });
-  } catch (error) {
-    console.error('[TOGGLE FAVORITE] Error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
-  }
-});
-
-// Get all forms for the authenticated user
-app.get("/make-server-26821bbd/forms", async (c) => {
-  try {
-    const user = await getUserFromRequest(c);
-    if (!user) {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
-
-    const db = getServiceClient();
-    const forms = await getFormsForUser(db, user.id);
-
-    const mappedForms = forms.map((form) => mapFormResponse(form));
-    return c.json({ success: true, forms: mappedForms });
-  } catch (error) {
-    console.error('[GET FORMS] Error fetching forms:', error);
-    return c.json({ success: false, error: String(error) }, 500);
-  }
-});
-
 // ========================================
-// MAILBOX OAUTH ROUTES
+// DEAL INTELLIGENCE REPORT ENDPOINTS
 // ========================================
 
-// Mailbox connection status - REQUIRES AUTH
-app.get("/make-server-26821bbd/communications/mailbox/status", async (c) => {
+// GET intelligence report for a submission (looks up call by submission_external_id) - REQUIRES AUTH
+app.get("/make-server-26821bbd/forms/:formId/submissions/:submissionId/intelligence-report", async (c) => {
   try {
     const user = await getUserFromRequest(c);
     if (!user) {
       return c.json({ success: false, error: 'Unauthorized' }, 401);
     }
 
-    const db = getServiceClient();
-    const connection = await getMailboxConnection(db, user.id);
-
-    return c.json({
-      success: true,
-      connected: Boolean(connection),
-      provider: connection?.provider ?? null,
-      email: connection?.mailbox_email ?? '',
-      fallbackEmail: typeof user.email === 'string' ? user.email : '',
-      lastSyncedAt: connection?.last_synced_at ?? null,
-    });
-  } catch (error) {
-    console.error('[MAILBOX STATUS] Error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
-  }
-});
-
-// Create OAuth connect URL for mailbox provider - REQUIRES AUTH
-app.get("/make-server-26821bbd/communications/mailbox/connect-url", async (c) => {
-  try {
-    const user = await getUserFromRequest(c);
-    if (!user) {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
-
-    const provider = mapMailboxProvider(c.req.query('provider'));
-    const config = getMailboxConfig();
-    const providerConfig = provider === 'microsoft' ? config.microsoft : config.google;
-
-    if (!providerConfig.clientId || !providerConfig.clientSecret || !config.stateSecret) {
-      return c.json({
-        success: false,
-        error: `${provider === 'microsoft' ? 'Microsoft' : 'Google'} OAuth is not configured. Set the required environment secrets.`,
-      }, 500);
-    }
-
-    const state = await buildMailboxState({
-      userId: user.id,
-      provider,
-      appBaseUrl: config.appBaseUrl,
-      secret: config.stateSecret,
-    });
-
-    if (provider === 'microsoft') {
-      const url = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
-      url.searchParams.set('client_id', providerConfig.clientId);
-      url.searchParams.set('response_type', 'code');
-      url.searchParams.set('redirect_uri', config.redirectUri);
-      url.searchParams.set('scope', 'Mail.Send Mail.Read User.Read offline_access');
-      url.searchParams.set('state', state);
-      url.searchParams.set('response_mode', 'query');
-      return c.json({ success: true, url: url.toString() });
-    }
-
-    const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-    url.searchParams.set('client_id', providerConfig.clientId);
-    url.searchParams.set('response_type', 'code');
-    url.searchParams.set('redirect_uri', config.redirectUri);
-    url.searchParams.set('scope', 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar');
-    url.searchParams.set('access_type', 'offline');
-    url.searchParams.set('prompt', 'consent');
-    url.searchParams.set('state', state);
-    return c.json({ success: true, url: url.toString() });
-  } catch (error) {
-    console.error('[MAILBOX CONNECT URL] Error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
-  }
-});
-
-// OAuth callback handler (redirected from Google/Microsoft)
-app.get("/make-server-26821bbd/communications/mailbox/callback", async (c) => {
-  const config = getMailboxConfig();
-  const redirectWithError = (appBaseUrl: string, msg: string) =>
-    c.redirect(`${appBaseUrl}?view=hub&mailbox=error&message=${encodeURIComponent(msg)}`);
-
-  try {
-    const code = c.req.query('code');
-    const stateParam = c.req.query('state');
-    const errorParam = c.req.query('error');
-
-    if (errorParam) {
-      return redirectWithError(config.appBaseUrl, errorParam);
-    }
-
-    if (!code || !stateParam) {
-      return redirectWithError(config.appBaseUrl, 'Missing code or state parameter.');
-    }
-
-    const statePayload = await parseMailboxState(stateParam, config.stateSecret);
-    const { userId, provider, appBaseUrl } = statePayload;
-    const providerConfig = provider === 'microsoft' ? config.microsoft : config.google;
-
-    // Exchange code for tokens
-    const tokenUrl = provider === 'microsoft'
-      ? 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
-      : 'https://oauth2.googleapis.com/token';
-
-    const tokenParams = new URLSearchParams({
-      client_id: providerConfig.clientId,
-      client_secret: providerConfig.clientSecret,
-      code,
-      redirect_uri: config.redirectUri,
-      grant_type: 'authorization_code',
-    });
-
-    const tokenResponse = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: tokenParams.toString(),
-    });
-
-    if (!tokenResponse.ok) {
-      const errorBody = await tokenResponse.text();
-      console.error('[MAILBOX CALLBACK] Token exchange error:', tokenResponse.status, errorBody);
-      return redirectWithError(appBaseUrl, 'Failed to exchange authorization code.');
-    }
-
-    const tokenData = await tokenResponse.json();
-    const accessToken = tokenData.access_token as string;
-    const refreshToken = typeof tokenData.refresh_token === 'string' ? tokenData.refresh_token : null;
-    const expiresIn = typeof tokenData.expires_in === 'number' ? tokenData.expires_in : 3600;
-
-    // Fetch user email from provider
-    let mailboxEmail = '';
-    if (provider === 'microsoft') {
-      const profileResponse = await fetch('https://graph.microsoft.com/v1.0/me', {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (profileResponse.ok) {
-        const profile = await profileResponse.json();
-        mailboxEmail = typeof profile.mail === 'string' ? profile.mail
-          : typeof profile.userPrincipalName === 'string' ? profile.userPrincipalName
-          : '';
-      }
-    } else {
-      const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (profileResponse.ok) {
-        const profile = await profileResponse.json();
-        mailboxEmail = typeof profile.email === 'string' ? profile.email : '';
-      }
-    }
-
-    if (!mailboxEmail) {
-      return redirectWithError(appBaseUrl, 'Could not retrieve email from provider.');
-    }
-
+    const submissionId = c.req.param('submissionId');
     const db = getServiceClient();
 
-    // Store tokens in user_mailbox_connections
-    await upsertMailboxConnection(db, {
-      user_id: userId,
-      provider,
-      mailbox_email: mailboxEmail,
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      token_expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      status: 'connected',
-    });
+    // Find call(s) for this submission
+    const { data: calls, error: callError } = await db
+      .from('application_calls')
+      .select('id')
+      .eq('owner_user_id', user.id)
+      .eq('submission_external_id', submissionId)
+      .order('scheduled_at', { ascending: false })
+      .limit(1);
 
-    // Also update vc_email_accounts so the linked email is used for sending
-    await db.from('vc_email_accounts').upsert(
-      {
-        user_id: userId,
-        linked_email: mailboxEmail,
-        provider,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id' },
-    );
-
-    return c.redirect(`${appBaseUrl}?view=hub&mailbox=connected`);
-  } catch (error) {
-    console.error('[MAILBOX CALLBACK] Error:', error);
-    return redirectWithError(config.appBaseUrl, String(error));
-  }
-});
-
-// Disconnect mailbox provider - REQUIRES AUTH
-app.post("/make-server-26821bbd/communications/mailbox/disconnect", async (c) => {
-  try {
-    const user = await getUserFromRequest(c);
-    if (!user) {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    if (callError || !calls || calls.length === 0) {
+      return c.json({ success: true, report: null });
     }
 
-    const db = getServiceClient();
+    const callId = calls[0].id;
 
-    const { error } = await db.from('user_mailbox_connections').delete().eq('user_id', user.id);
+    const { data: rows, error } = await db
+      .from('call_intelligence_reports')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .limit(1);
+
     if (error) {
-      const message = error.message ?? '';
-      if (!message.includes('relation') && !message.includes('schema cache')) {
-        return c.json({ success: false, error: error.message }, 500);
-      }
+      return c.json({ success: false, error: error.message }, 500);
     }
 
-    // Also clear the vc_email_accounts row
-    await db.from('vc_email_accounts').delete().eq('user_id', user.id);
+    if (!rows || rows.length === 0) {
+      return c.json({ success: true, report: null });
+    }
 
-    return c.json({ success: true });
+    return c.json({ success: true, report: rows[0].report, cached: true });
   } catch (error) {
-    console.error('[MAILBOX DISCONNECT] Error:', error);
+    console.error('[GET SUBMISSION INTELLIGENCE REPORT] Error:', error);
     return c.json({ success: false, error: String(error) }, 500);
   }
 });
 
-// Manually sync inbox messages from mailbox provider - REQUIRES AUTH
-app.post("/make-server-26821bbd/communications/mailbox/sync", async (c) => {
-  try {
-    const user = await getUserFromRequest(c);
-    if (!user) {
-      return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
-
-    const db = getServiceClient();
-    const connection = await getMailboxConnection(db, user.id);
-    if (!connection) {
-      return c.json({ success: false, error: 'No connected mailbox found.' }, 400);
-    }
-
-    await syncMailboxMessages(db, user.id, connection);
-    return c.json({ success: true });
-  } catch (error) {
-    console.error('[MAILBOX SYNC] Error:', error);
-    return c.json({ success: false, error: String(error) }, 500);
-  }
-});
-
-// ========================================
-// DEAL INTELLIGENCE REPORT
-// ========================================
-
-// GET cached intelligence report for a call
+// GET intelligence report for a call - REQUIRES AUTH
 app.get("/make-server-26821bbd/calls/:callId/intelligence-report", async (c) => {
   try {
     const user = await getUserFromRequest(c);
@@ -4323,7 +4089,7 @@ app.get("/make-server-26821bbd/calls/:callId/intelligence-report", async (c) => 
   }
 });
 
-// POST generate intelligence report for a call
+// POST generate intelligence report for a call - REQUIRES AUTH
 app.post("/make-server-26821bbd/calls/:callId/intelligence-report/generate", async (c) => {
   try {
     const user = await getUserFromRequest(c);
@@ -4683,6 +4449,513 @@ app.post("/make-server-26821bbd/calls/:callId/intelligence-report/generate", asy
     return c.json({ success: true, report, cached: false });
   } catch (error) {
     console.error('[INTELLIGENCE REPORT GENERATE] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get favorite submissions for the authenticated VC on a form
+app.get("/make-server-26821bbd/forms/:formId/favorites", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const formId = c.req.param('formId');
+    const db = getServiceClient();
+    const form = await getFormByExternalId(db, formId);
+    if (!form) {
+      return c.json({ success: false, error: 'Form not found' }, 404);
+    }
+    if (!isOwner(form, user.id)) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
+    const favorites = await getFavoriteExternalSubmissionIds(db, user.id, form);
+    return c.json({ success: true, favorites });
+  } catch (error) {
+    console.error('[GET FAVORITES] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Toggle favorite state for a submission
+app.post("/make-server-26821bbd/forms/:formId/favorites/toggle", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const formId = c.req.param('formId');
+    const { submissionId } = await c.req.json();
+    if (!submissionId || typeof submissionId !== 'string') {
+      return c.json({ success: false, error: 'submissionId is required' }, 400);
+    }
+
+    const db = getServiceClient();
+    const form = await getFormByExternalId(db, formId);
+    if (!form) {
+      return c.json({ success: false, error: 'Form not found' }, 404);
+    }
+    if (!isOwner(form, user.id)) {
+      return c.json({ success: false, error: 'Forbidden' }, 403);
+    }
+
+    const submissions = await getSubmissionsForForm(db, form);
+    const targetSubmission = submissions.find((row) => {
+      const external = typeof row.external_submission_id === 'string' ? row.external_submission_id : '';
+      const legacy = typeof row.submission_id === 'string' ? row.submission_id : '';
+      const internal = String(row.id ?? '');
+      return external === submissionId || legacy === submissionId || internal === submissionId;
+    });
+
+    if (!targetSubmission) {
+      return c.json({ success: false, error: 'Submission not found' }, 404);
+    }
+
+    const favoriteCandidateIds = Array.from(
+      new Set(
+        [
+          typeof targetSubmission.id === 'string' ? targetSubmission.id : '',
+          typeof targetSubmission.external_submission_id === 'string' ? targetSubmission.external_submission_id : '',
+          typeof targetSubmission.submission_id === 'string' ? targetSubmission.submission_id : '',
+          submissionId,
+        ].filter((value) => value.trim().length > 0),
+      ),
+    );
+
+    const existing = await db
+      .from('submission_favorites')
+      .select('submission_id')
+      .eq('user_id', user.id);
+
+    if (existing.error) {
+      return c.json({ success: false, error: existing.error.message }, 500);
+    }
+
+    const favoriteSet = new Set(
+      ((existing.data as Record<string, unknown>[] | null) ?? [])
+        .map((row) => String(row.submission_id ?? '').trim())
+        .filter((value) => value.length > 0),
+    );
+    const currentlyFavorite = favoriteCandidateIds.some((id) => favoriteSet.has(id));
+
+    let isFavorite = currentlyFavorite;
+    if (currentlyFavorite) {
+      for (const candidateId of favoriteCandidateIds) {
+        const { error: deleteError } = await db
+          .from('submission_favorites')
+          .delete()
+          .eq('user_id', user.id)
+          .eq('submission_id', candidateId);
+
+        if (deleteError) {
+          const message = deleteError.message ?? '';
+          if (!message.includes('invalid input syntax for type uuid')) {
+            return c.json({ success: false, error: deleteError.message }, 500);
+          }
+        }
+      }
+      isFavorite = false;
+    } else {
+      let inserted = false;
+      let insertError: string | null = null;
+
+      for (const candidateId of favoriteCandidateIds) {
+        try {
+          await insertRowWithFallback(db, 'submission_favorites', {
+            user_id: user.id,
+            submission_id: candidateId,
+            created_at: new Date().toISOString(),
+          });
+          inserted = true;
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          insertError = message;
+          if (
+            message.includes('invalid input syntax for type uuid') ||
+            message.includes('violates foreign key constraint')
+          ) {
+            continue;
+          }
+          return c.json({ success: false, error: message }, 500);
+        }
+      }
+
+      if (!inserted) {
+        return c.json({
+          success: false,
+          error: insertError ?? 'Failed to save favourite submission',
+        }, 500);
+      }
+
+      isFavorite = true;
+    }
+
+    const favorites = await getFavoriteExternalSubmissionIds(db, user.id, form);
+    return c.json({
+      success: true,
+      favorites,
+      isFavorite,
+    });
+  } catch (error) {
+    console.error('[TOGGLE FAVORITE] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get all forms for the authenticated user
+app.get("/make-server-26821bbd/forms", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const db = getServiceClient();
+    const forms = await getFormsForUser(db, user.id);
+
+    const mappedForms = forms.map((form) => mapFormResponse(form));
+    return c.json({ success: true, forms: mappedForms });
+  } catch (error) {
+    console.error('[GET FORMS] Error fetching forms:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ========================================
+// PORTFOLIO CRUD
+// ========================================
+
+// GET /portfolio — list all portfolio companies for the authenticated user
+app.get("/make-server-26821bbd/portfolio", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const db = getServiceClient();
+    const { data, error } = await db
+      .from('portfolio_companies')
+      .select('*')
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[PORTFOLIO GET] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    const companies = (data ?? []).map((row: any) => ({
+      id: row.id,
+      companyName: row.company_name,
+      industry: row.industry,
+      country: row.country,
+      continent: row.continent,
+      fundingStage: row.funding_stage,
+      dealSize: row.deal_size != null ? Number(row.deal_size) : null,
+      investmentDate: row.investment_date,
+      valuation: row.valuation != null ? Number(row.valuation) : null,
+      equityPercent: row.equity_percent != null ? Number(row.equity_percent) : null,
+      status: row.status,
+      submissionId: row.submission_id,
+      notes: row.notes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return c.json({ success: true, companies });
+  } catch (error) {
+    console.error('[PORTFOLIO GET] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// POST /portfolio — add a new portfolio company
+app.post("/make-server-26821bbd/portfolio", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const body = await c.req.json();
+    const db = getServiceClient();
+
+    const { data, error } = await db
+      .from('portfolio_companies')
+      .insert({
+        owner_user_id: user.id,
+        company_name: body.companyName,
+        industry: body.industry || null,
+        country: body.country || null,
+        continent: body.continent || null,
+        funding_stage: body.fundingStage || null,
+        deal_size: body.dealSize != null ? body.dealSize : null,
+        investment_date: body.investmentDate || null,
+        valuation: body.valuation != null ? body.valuation : null,
+        equity_percent: body.equityPercent != null ? body.equityPercent : null,
+        status: body.status || 'active',
+        submission_id: body.submissionId || null,
+        notes: body.notes || null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[PORTFOLIO ADD] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    return c.json({
+      success: true,
+      company: {
+        id: data.id,
+        companyName: data.company_name,
+        industry: data.industry,
+        country: data.country,
+        continent: data.continent,
+        fundingStage: data.funding_stage,
+        dealSize: data.deal_size != null ? Number(data.deal_size) : null,
+        investmentDate: data.investment_date,
+        valuation: data.valuation != null ? Number(data.valuation) : null,
+        equityPercent: data.equity_percent != null ? Number(data.equity_percent) : null,
+        status: data.status,
+        submissionId: data.submission_id,
+        notes: data.notes,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error('[PORTFOLIO ADD] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// PUT /portfolio/:id — update a portfolio company
+app.put("/make-server-26821bbd/portfolio/:id", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const companyId = c.req.param('id');
+    const body = await c.req.json();
+    const db = getServiceClient();
+
+    const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (body.companyName !== undefined) updates.company_name = body.companyName;
+    if (body.industry !== undefined) updates.industry = body.industry || null;
+    if (body.country !== undefined) updates.country = body.country || null;
+    if (body.continent !== undefined) updates.continent = body.continent || null;
+    if (body.fundingStage !== undefined) updates.funding_stage = body.fundingStage || null;
+    if (body.dealSize !== undefined) updates.deal_size = body.dealSize;
+    if (body.investmentDate !== undefined) updates.investment_date = body.investmentDate || null;
+    if (body.valuation !== undefined) updates.valuation = body.valuation;
+    if (body.equityPercent !== undefined) updates.equity_percent = body.equityPercent;
+    if (body.status !== undefined) updates.status = body.status;
+    if (body.submissionId !== undefined) updates.submission_id = body.submissionId || null;
+    if (body.notes !== undefined) updates.notes = body.notes || null;
+
+    const { data, error } = await db
+      .from('portfolio_companies')
+      .update(updates)
+      .eq('id', companyId)
+      .eq('owner_user_id', user.id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[PORTFOLIO UPDATE] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    return c.json({
+      success: true,
+      company: {
+        id: data.id,
+        companyName: data.company_name,
+        industry: data.industry,
+        country: data.country,
+        continent: data.continent,
+        fundingStage: data.funding_stage,
+        dealSize: data.deal_size != null ? Number(data.deal_size) : null,
+        investmentDate: data.investment_date,
+        valuation: data.valuation != null ? Number(data.valuation) : null,
+        equityPercent: data.equity_percent != null ? Number(data.equity_percent) : null,
+        status: data.status,
+        submissionId: data.submission_id,
+        notes: data.notes,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error('[PORTFOLIO UPDATE] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// DELETE /portfolio/:id — delete a portfolio company
+app.delete("/make-server-26821bbd/portfolio/:id", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const companyId = c.req.param('id');
+    const db = getServiceClient();
+
+    const { error } = await db
+      .from('portfolio_companies')
+      .delete()
+      .eq('id', companyId)
+      .eq('owner_user_id', user.id);
+
+    if (error) {
+      console.error('[PORTFOLIO DELETE] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('[PORTFOLIO DELETE] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ========================================
+// PORTFOLIO AI RECOMMENDATIONS
+// ========================================
+
+app.post("/make-server-26821bbd/portfolio/ai-recommendations", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const db = getServiceClient();
+
+    // 1. Fetch portfolio
+    const { data: portfolio } = await db
+      .from('portfolio_companies')
+      .select('*')
+      .eq('owner_user_id', user.id);
+
+    // 2. Fetch VC thesis/criteria
+    const { data: criteriaRows } = await db
+      .from('vc_criteria')
+      .select('criteria')
+      .eq('user_id', user.id)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+
+    const thesis = criteriaRows?.[0]?.criteria ?? null;
+
+    // 3. Fetch recent form submissions (get user's forms first, then their submissions)
+    const { data: userForms } = await db
+      .from('forms')
+      .select('id')
+      .eq('user_id', user.id);
+
+    let submissions: any[] = [];
+    if (userForms && userForms.length > 0) {
+      const formIds = userForms.map((f: any) => f.id);
+      const { data: subs } = await db
+        .from('form_submissions')
+        .select('*')
+        .in('form_id', formIds)
+        .order('submitted_at', { ascending: false })
+        .limit(50);
+      submissions = subs ?? [];
+    }
+
+    // 4. Build OpenAI prompt
+    const portfolioSummary = (portfolio ?? []).map((p: any) => ({
+      name: p.company_name,
+      industry: p.industry,
+      country: p.country,
+      continent: p.continent,
+      stage: p.funding_stage,
+      dealSize: p.deal_size,
+      status: p.status,
+    }));
+
+    const applicantSummaries = submissions.map((s: any) => {
+      const data = s.data ?? s.answers ?? {};
+      return {
+        submissionId: s.id ?? s.submission_id,
+        companyName: data.company_name ?? data.companyName ?? data['Company Name'] ?? 'Unknown',
+        answers: data,
+        submittedAt: s.submitted_at,
+      };
+    });
+
+    const systemPrompt = `You are a VC portfolio advisor. Given a VC's current portfolio, thesis, and a list of startup applicants, recommend the top 3-5 best next investments.
+
+Consider:
+- Portfolio diversification (industry, geography, funding stage)
+- Thesis alignment
+- Portfolio gaps that should be filled
+
+Return a JSON array of recommendations. Each recommendation should have:
+- "companyName": string
+- "submissionId": string
+- "rationale": string (2-3 sentences explaining why this is a good fit)
+- "fitScore": number (1-10)
+- "diversificationBenefit": string (what gap does this fill)
+
+Return ONLY the JSON array, no other text.`;
+
+    const userPrompt = `Current Portfolio (${portfolioSummary.length} companies):
+${JSON.stringify(portfolioSummary, null, 2)}
+
+VC Thesis/Criteria:
+${thesis ? JSON.stringify(thesis, null, 2) : 'No thesis defined yet.'}
+
+Recent Applicants (${applicantSummaries.length}):
+${JSON.stringify(applicantSummaries, null, 2)}`;
+
+    const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
+    if (!OPENAI_API_KEY) {
+      return c.json({ success: false, error: 'OpenAI API key not configured' }, 500);
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 2000,
+      }),
+    });
+
+    if (!openaiResponse.ok) {
+      const errText = await openaiResponse.text();
+      console.error('[PORTFOLIO AI] OpenAI error:', errText);
+      return c.json({ success: false, error: 'Failed to get AI recommendations' }, 500);
+    }
+
+    const openaiResult = await openaiResponse.json();
+    const content = openaiResult.choices?.[0]?.message?.content ?? '[]';
+
+    let recommendations: any[];
+    try {
+      const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      recommendations = JSON.parse(cleaned);
+    } catch {
+      console.error('[PORTFOLIO AI] Failed to parse recommendations:', content);
+      recommendations = [];
+    }
+
+    return c.json({ success: true, recommendations });
+  } catch (error) {
+    console.error('[PORTFOLIO AI] Exception:', error);
     return c.json({ success: false, error: String(error) }, 500);
   }
 });

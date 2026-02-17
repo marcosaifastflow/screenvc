@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
-import { Sparkles, ClipboardList, FileText, LogOut, User, Mail, CalendarClock } from 'lucide-react';
+import { Sparkles, ClipboardList, FileText, LogOut, User, Mail, CalendarClock, Briefcase } from 'lucide-react';
 import { getMailboxStatus, getMailboxConnectUrl, disconnectMailbox, type MailboxStatus } from '../utils/api';
 import { toast } from 'sonner';
 
@@ -12,6 +12,7 @@ interface VCHubPageProps {
   onOpenResults: () => void;
   onOpenInbox: () => void;
   onOpenCalls: () => void;
+  onOpenPortfolio: () => void;
   onLogout: () => void;
 }
 
@@ -22,6 +23,7 @@ export function VCHubPage({
   onOpenResults,
   onOpenInbox,
   onOpenCalls,
+  onOpenPortfolio,
   onLogout,
 }: VCHubPageProps) {
   const [mailboxStatus, setMailboxStatus] = useState<MailboxStatus | null>(null);
@@ -172,6 +174,19 @@ export function VCHubPage({
             </p>
             <Button onClick={onOpenCalls} className="w-full">
               Open Calls
+            </Button>
+          </Card>
+
+          <Card className="p-8">
+            <div className="size-12 rounded-lg bg-primary/10 flex items-center justify-center mb-4">
+              <Briefcase className="size-6 text-primary" />
+            </div>
+            <h2 className="mb-2">My Portfolio</h2>
+            <p className="text-muted-foreground mb-6">
+              Track your startup investments, view portfolio analytics, and get AI recommendations.
+            </p>
+            <Button onClick={onOpenPortfolio} className="w-full">
+              Open Portfolio
             </Button>
           </Card>
 

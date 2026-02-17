@@ -3630,6 +3630,829 @@ app.get("/make-server-26821bbd/communications/calls", async (c) => {
   }
 });
 
+// ========================================
+// NOTETAKER BOT ENDPOINTS
+// ========================================
+
+// Send notetaker bot to join a call - REQUIRES AUTH
+app.post("/make-server-26821bbd/calls/:callId/notetaker/send", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    // Verify the call belongs to this user and has a meet link
+    const { data: callRow, error: callError } = await db
+      .from('application_calls')
+      .select('*')
+      .eq('id', callId)
+      .eq('owner_user_id', user.id)
+      .single();
+
+    if (callError || !callRow) {
+      return c.json({ success: false, error: 'Call not found or not authorized.' }, 404);
+    }
+
+    if (!callRow.meet_link) {
+      return c.json({ success: false, error: 'Call has no Google Meet link.' }, 400);
+    }
+
+    // Check if there's already an active session for this call
+    const { data: existingSessions } = await db
+      .from('call_notetaker_sessions')
+      .select('id, status')
+      .eq('call_id', callId)
+      .in('status', ['requesting', 'joining', 'recording', 'processing']);
+
+    if (existingSessions && existingSessions.length > 0) {
+      return c.json({
+        success: false,
+        error: 'A notetaker is already active for this call.',
+        sessionId: existingSessions[0].id,
+        status: existingSessions[0].status,
+      }, 409);
+    }
+
+    // Create a new notetaker session
+    const sessionRow = {
+      call_id: callId,
+      owner_user_id: user.id,
+      bot_name: 'ScreenVC Notetaker',
+      status: 'requesting',
+      requested_at: new Date().toISOString(),
+    };
+
+    const { data: session, error: insertError } = await db
+      .from('call_notetaker_sessions')
+      .insert(sessionRow)
+      .select('id')
+      .single();
+
+    if (insertError || !session) {
+      console.error('[NOTETAKER SEND] Insert error:', insertError);
+      return c.json({ success: false, error: 'Failed to create notetaker session.' }, 500);
+    }
+
+    // Dispatch to bot service
+    const botServiceUrl = Deno.env.get('BOT_SERVICE_URL');
+    const botServiceSecret = Deno.env.get('BOT_SERVICE_SECRET');
+
+    if (!botServiceUrl || !botServiceSecret) {
+      // Update session to failed
+      await db.from('call_notetaker_sessions').update({
+        status: 'failed',
+        error_message: 'Bot service not configured.',
+      }).eq('id', session.id);
+      return c.json({ success: false, error: 'Notetaker bot service is not configured.' }, 500);
+    }
+
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const webhookSecret = Deno.env.get('NOTETAKER_WEBHOOK_SECRET') ?? botServiceSecret;
+    const callbackUrl = `${supabaseUrl}/functions/v1/make-server-26821bbd/notetaker/webhook`;
+
+    try {
+      const botResponse = await fetch(`${botServiceUrl}/join`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${botServiceSecret}`,
+        },
+        body: JSON.stringify({
+          callId,
+          sessionId: session.id,
+          meetLink: callRow.meet_link,
+          botName: 'ScreenVC Notetaker',
+          callbackUrl,
+          callbackSecret: webhookSecret,
+        }),
+      });
+
+      if (!botResponse.ok) {
+        const errText = await botResponse.text();
+        console.error('[NOTETAKER SEND] Bot service error:', errText);
+        await db.from('call_notetaker_sessions').update({
+          status: 'failed',
+          error_message: `Bot service returned ${botResponse.status}`,
+        }).eq('id', session.id);
+        return c.json({ success: false, error: 'Failed to dispatch notetaker bot.' }, 502);
+      }
+    } catch (fetchErr) {
+      console.error('[NOTETAKER SEND] Bot service fetch error:', fetchErr);
+      await db.from('call_notetaker_sessions').update({
+        status: 'failed',
+        error_message: 'Bot service unreachable.',
+      }).eq('id', session.id);
+      return c.json({ success: false, error: 'Notetaker bot service is unreachable.' }, 502);
+    }
+
+    return c.json({
+      success: true,
+      sessionId: session.id,
+      status: 'requesting',
+    });
+  } catch (error) {
+    console.error('[NOTETAKER SEND] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get notetaker status for a call - REQUIRES AUTH
+app.get("/make-server-26821bbd/calls/:callId/notetaker/status", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    const { data: sessions, error } = await db
+      .from('call_notetaker_sessions')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('requested_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    if (!sessions || sessions.length === 0) {
+      return c.json({ success: true, session: null });
+    }
+
+    const row = sessions[0] as Record<string, unknown>;
+    return c.json({
+      success: true,
+      session: {
+        id: String(row.id),
+        callId: String(row.call_id),
+        status: typeof row.status === 'string' ? row.status : 'unknown',
+        botName: typeof row.bot_name === 'string' ? row.bot_name : 'ScreenVC Notetaker',
+        errorMessage: typeof row.error_message === 'string' ? row.error_message : null,
+        requestedAt: typeof row.requested_at === 'string' ? row.requested_at : null,
+        joinedAt: typeof row.joined_at === 'string' ? row.joined_at : null,
+        endedAt: typeof row.ended_at === 'string' ? row.ended_at : null,
+      },
+    });
+  } catch (error) {
+    console.error('[NOTETAKER STATUS] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get call transcript - REQUIRES AUTH
+app.get("/make-server-26821bbd/calls/:callId/transcript", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    const { data: transcripts, error } = await db
+      .from('call_transcripts')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    if (!transcripts || transcripts.length === 0) {
+      return c.json({ success: true, transcript: null });
+    }
+
+    const row = transcripts[0] as Record<string, unknown>;
+    return c.json({
+      success: true,
+      transcript: {
+        id: String(row.id),
+        callId: String(row.call_id),
+        fullText: typeof row.full_text === 'string' ? row.full_text : '',
+        segments: Array.isArray(row.segments) ? row.segments : [],
+        durationSeconds: typeof row.duration_seconds === 'number' ? row.duration_seconds : null,
+        wordCount: typeof row.word_count === 'number' ? row.word_count : null,
+        createdAt: typeof row.created_at === 'string' ? row.created_at : new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('[GET TRANSCRIPT] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Get call summary - REQUIRES AUTH
+app.get("/make-server-26821bbd/calls/:callId/summary", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    const { data: summaries, error } = await db
+      .from('call_summaries')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    if (!summaries || summaries.length === 0) {
+      return c.json({ success: true, summary: null });
+    }
+
+    const row = summaries[0] as Record<string, unknown>;
+    return c.json({
+      success: true,
+      summary: {
+        id: String(row.id),
+        callId: String(row.call_id),
+        overallSummary: typeof row.overall_summary === 'string' ? row.overall_summary : '',
+        keyPoints: Array.isArray(row.key_points) ? row.key_points : [],
+        actionItems: Array.isArray(row.action_items) ? row.action_items : [],
+        founderImpressions: typeof row.founder_impressions === 'string' ? row.founder_impressions : '',
+        concerns: Array.isArray(row.concerns) ? row.concerns : [],
+        nextSteps: Array.isArray(row.next_steps) ? row.next_steps : [],
+        createdAt: typeof row.created_at === 'string' ? row.created_at : new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('[GET SUMMARY] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// Notetaker webhook - receives bot results (uses shared secret, no JWT auth)
+app.post("/make-server-26821bbd/notetaker/webhook", async (c) => {
+  try {
+    const expectedSecret = Deno.env.get('NOTETAKER_WEBHOOK_SECRET') ?? Deno.env.get('BOT_SERVICE_SECRET');
+    if (!expectedSecret) {
+      return c.json({ success: false, error: 'Webhook secret is not configured.' }, 500);
+    }
+
+    const providedSecret = c.req.header('x-webhook-secret');
+    if (providedSecret !== expectedSecret) {
+      return c.json({ success: false, error: 'Unauthorized webhook call.' }, 401);
+    }
+
+    const payload = await c.req.json();
+    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+    const eventType = typeof payload.eventType === 'string' ? payload.eventType : '';
+
+    if (!sessionId || !eventType) {
+      return c.json({ success: false, error: 'Invalid webhook payload.' }, 400);
+    }
+
+    const db = getServiceClient();
+
+    // Look up the session
+    const { data: sessionRow, error: sessionError } = await db
+      .from('call_notetaker_sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .single();
+
+    if (sessionError || !sessionRow) {
+      return c.json({ success: false, error: 'Session not found.' }, 404);
+    }
+
+    const callId = sessionRow.call_id;
+    const ownerUserId = sessionRow.owner_user_id;
+
+    if (eventType === 'status_update') {
+      // Update session status
+      const newStatus = typeof payload.status === 'string' ? payload.status : sessionRow.status;
+      const updateData: Record<string, unknown> = { status: newStatus };
+
+      if (newStatus === 'joining' || newStatus === 'recording') {
+        updateData.joined_at = new Date().toISOString();
+      }
+      if (newStatus === 'failed') {
+        updateData.error_message = typeof payload.errorMessage === 'string' ? payload.errorMessage : 'Unknown error';
+        updateData.ended_at = new Date().toISOString();
+      }
+
+      await db.from('call_notetaker_sessions').update(updateData).eq('id', sessionId);
+      return c.json({ success: true });
+    }
+
+    if (eventType === 'completed') {
+      // Update session to completed
+      await db.from('call_notetaker_sessions').update({
+        status: 'completed',
+        ended_at: new Date().toISOString(),
+      }).eq('id', sessionId);
+
+      // Insert transcript if provided
+      if (payload.transcript && typeof payload.transcript === 'object') {
+        const t = payload.transcript;
+        await insertRowWithFallback(db, 'call_transcripts', {
+          call_id: callId,
+          notetaker_session_id: sessionId,
+          owner_user_id: ownerUserId,
+          full_text: typeof t.fullText === 'string' ? t.fullText : '',
+          segments: Array.isArray(t.segments) ? JSON.stringify(t.segments) : '[]',
+          duration_seconds: typeof t.durationSeconds === 'number' ? t.durationSeconds : null,
+          word_count: typeof t.wordCount === 'number' ? t.wordCount : null,
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      // Insert summary if provided
+      if (payload.summary && typeof payload.summary === 'object') {
+        const s = payload.summary;
+        await insertRowWithFallback(db, 'call_summaries', {
+          call_id: callId,
+          notetaker_session_id: sessionId,
+          owner_user_id: ownerUserId,
+          overall_summary: typeof s.overallSummary === 'string' ? s.overallSummary : '',
+          key_points: Array.isArray(s.keyPoints) ? JSON.stringify(s.keyPoints) : '[]',
+          action_items: Array.isArray(s.actionItems) ? JSON.stringify(s.actionItems) : '[]',
+          founder_impressions: typeof s.founderImpressions === 'string' ? s.founderImpressions : null,
+          concerns: Array.isArray(s.concerns) ? JSON.stringify(s.concerns) : '[]',
+          next_steps: Array.isArray(s.nextSteps) ? JSON.stringify(s.nextSteps) : '[]',
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      return c.json({ success: true });
+    }
+
+    return c.json({ success: false, error: `Unknown event type: ${eventType}` }, 400);
+  } catch (error) {
+    console.error('[NOTETAKER WEBHOOK] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ========================================
+// DEAL INTELLIGENCE REPORT ENDPOINTS
+// ========================================
+
+// GET intelligence report for a submission (looks up call by submission_external_id) - REQUIRES AUTH
+app.get("/make-server-26821bbd/forms/:formId/submissions/:submissionId/intelligence-report", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const submissionId = c.req.param('submissionId');
+    const db = getServiceClient();
+
+    // Find call(s) for this submission
+    const { data: calls, error: callError } = await db
+      .from('application_calls')
+      .select('id')
+      .eq('owner_user_id', user.id)
+      .eq('submission_external_id', submissionId)
+      .order('scheduled_at', { ascending: false })
+      .limit(1);
+
+    if (callError || !calls || calls.length === 0) {
+      return c.json({ success: true, report: null });
+    }
+
+    const callId = calls[0].id;
+
+    const { data: rows, error } = await db
+      .from('call_intelligence_reports')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .limit(1);
+
+    if (error) {
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    if (!rows || rows.length === 0) {
+      return c.json({ success: true, report: null });
+    }
+
+    return c.json({ success: true, report: rows[0].report, cached: true });
+  } catch (error) {
+    console.error('[GET SUBMISSION INTELLIGENCE REPORT] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// GET intelligence report for a call - REQUIRES AUTH
+app.get("/make-server-26821bbd/calls/:callId/intelligence-report", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    const { data: rows, error } = await db
+      .from('call_intelligence_reports')
+      .select('*')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .limit(1);
+
+    if (error) {
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    if (!rows || rows.length === 0) {
+      return c.json({ success: true, report: null });
+    }
+
+    return c.json({ success: true, report: rows[0].report, cached: true });
+  } catch (error) {
+    console.error('[GET INTELLIGENCE REPORT] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// POST generate intelligence report for a call - REQUIRES AUTH
+app.post("/make-server-26821bbd/calls/:callId/intelligence-report/generate", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) {
+      return c.json({ success: false, error: 'Unauthorized' }, 401);
+    }
+
+    const callId = c.req.param('callId');
+    const db = getServiceClient();
+
+    // Check for cached report first
+    const { data: existingRows } = await db
+      .from('call_intelligence_reports')
+      .select('report')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .limit(1);
+
+    if (existingRows && existingRows.length > 0 && existingRows[0].report) {
+      return c.json({ success: true, report: existingRows[0].report, cached: true });
+    }
+
+    // Load call details
+    const { data: callRow, error: callError } = await db
+      .from('application_calls')
+      .select('*')
+      .eq('id', callId)
+      .eq('owner_user_id', user.id)
+      .single();
+
+    if (callError || !callRow) {
+      return c.json({ success: false, error: 'Call not found or not authorized.' }, 404);
+    }
+
+    // Load transcript
+    const { data: transcripts } = await db
+      .from('call_transcripts')
+      .select('full_text, segments')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const transcriptText = transcripts?.[0]?.full_text || '';
+    if (!transcriptText) {
+      return c.json({ success: false, error: 'No transcript available for this call. Ensure the notetaker has completed.' }, 400);
+    }
+
+    // Load summary
+    const { data: summaries } = await db
+      .from('call_summaries')
+      .select('overall_summary, key_points, action_items, concerns, next_steps, founder_impressions')
+      .eq('call_id', callId)
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const summaryRow = summaries?.[0] ?? null;
+
+    // Load VC thesis
+    const { data: criteriaRow } = await db
+      .from('vc_criteria')
+      .select('thesis')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    const vcThesis = criteriaRow?.thesis ?? {};
+
+    // Load submission data if call has a submission
+    let submissionData: Record<string, unknown> = {};
+    let fitEvaluation: Record<string, unknown> | null = null;
+    const submissionId = callRow.submission_id;
+    if (submissionId) {
+      const { data: subRow } = await db
+        .from('submissions')
+        .select('data, ai_fit_evaluation')
+        .eq('id', submissionId)
+        .maybeSingle();
+
+      if (subRow) {
+        submissionData = (subRow.data as Record<string, unknown>) ?? {};
+        fitEvaluation = (subRow.ai_fit_evaluation as Record<string, unknown>) ?? null;
+      }
+    }
+
+    // Truncate transcript to ~40k chars for the prompt
+    const truncatedTranscript = transcriptText.length > 40000
+      ? transcriptText.slice(0, 40000) + '\n\n[TRANSCRIPT TRUNCATED]'
+      : transcriptText;
+
+    // Build the AI prompt
+    const companyName = typeof callRow.company_name === 'string' ? callRow.company_name : 'Unknown Company';
+    const callDate = typeof callRow.scheduled_at === 'string'
+      ? new Date(callRow.scheduled_at).toLocaleDateString()
+      : new Date().toLocaleDateString();
+
+    const apiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!apiKey) {
+      return c.json({ success: false, error: 'OpenAI API key not configured.' }, 500);
+    }
+
+    const intelligenceSchema = {
+      type: 'object' as const,
+      additionalProperties: false,
+      properties: {
+        header: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            companyName: { type: 'string' as const },
+            stage: { type: 'string' as const },
+            sector: { type: 'string' as const },
+            fundraisingTarget: { type: 'string' as const },
+            callDate: { type: 'string' as const },
+            thesisAlignmentScore: { type: 'number' as const },
+          },
+          required: ['companyName', 'stage', 'sector', 'fundraisingTarget', 'callDate', 'thesisAlignmentScore'],
+        },
+        executiveSummary: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            summary: { type: 'string' as const },
+            investmentSignal: { type: 'string' as const, enum: ['Strong Pass', 'Lean Pass', 'Neutral', 'Lean Invest', 'Strong Invest'] },
+            signalRationale: { type: 'string' as const },
+          },
+          required: ['summary', 'investmentSignal', 'signalRationale'],
+        },
+        founderAnalysis: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            dimensions: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  name: { type: 'string' as const },
+                  score: { type: 'number' as const },
+                  assessment: { type: 'string' as const },
+                  evidence: { type: 'string' as const },
+                },
+                required: ['name', 'score', 'assessment', 'evidence'],
+              },
+            },
+          },
+          required: ['dimensions'],
+        },
+        riskDashboard: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            flags: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  severity: { type: 'string' as const, enum: ['red', 'yellow', 'green'] },
+                  category: { type: 'string' as const },
+                  description: { type: 'string' as const },
+                  evidence: { type: 'string' as const },
+                },
+                required: ['severity', 'category', 'description', 'evidence'],
+              },
+            },
+          },
+          required: ['flags'],
+        },
+        competitiveIntelligence: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            competitors: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  name: { type: 'string' as const },
+                  description: { type: 'string' as const },
+                  threatLevel: { type: 'string' as const, enum: ['Low', 'Medium', 'High'] },
+                },
+                required: ['name', 'description', 'threatLevel'],
+              },
+            },
+            differentiation: { type: 'string' as const },
+            positioning: { type: 'string' as const },
+          },
+          required: ['competitors', 'differentiation', 'positioning'],
+        },
+        questionCoverage: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            overallCoveragePercent: { type: 'number' as const },
+            areas: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  area: { type: 'string' as const },
+                  coveragePercent: { type: 'number' as const },
+                  covered: { type: 'array' as const, items: { type: 'string' as const } },
+                  gaps: { type: 'array' as const, items: { type: 'string' as const } },
+                },
+                required: ['area', 'coveragePercent', 'covered', 'gaps'],
+              },
+            },
+            suggestedFollowUps: { type: 'array' as const, items: { type: 'string' as const } },
+          },
+          required: ['overallCoveragePercent', 'areas', 'suggestedFollowUps'],
+        },
+        dealStrengthScore: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            overall: { type: 'number' as const },
+            breakdown: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  dimension: { type: 'string' as const },
+                  score: { type: 'number' as const },
+                  weight: { type: 'number' as const },
+                },
+                required: ['dimension', 'score', 'weight'],
+              },
+            },
+          },
+          required: ['overall', 'breakdown'],
+        },
+        icMemo: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            title: { type: 'string' as const },
+            sections: {
+              type: 'array' as const,
+              items: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  heading: { type: 'string' as const },
+                  content: { type: 'string' as const },
+                },
+                required: ['heading', 'content'],
+              },
+            },
+          },
+          required: ['title', 'sections'],
+        },
+        transcriptAnnotations: {
+          type: 'array' as const,
+          items: {
+            type: 'object' as const,
+            additionalProperties: false,
+            properties: {
+              quote: { type: 'string' as const },
+              type: { type: 'string' as const, enum: ['risk', 'signal', 'metric', 'competitor'] },
+              label: { type: 'string' as const },
+            },
+            required: ['quote', 'type', 'label'],
+          },
+        },
+      },
+      required: [
+        'header', 'executiveSummary', 'founderAnalysis', 'riskDashboard',
+        'competitiveIntelligence', 'questionCoverage', 'dealStrengthScore',
+        'icMemo', 'transcriptAnnotations',
+      ],
+    };
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: Deno.env.get('OPENAI_MODEL') ?? 'gpt-4.1-mini',
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'deal_intelligence_report',
+            strict: true,
+            schema: intelligenceSchema,
+          },
+        },
+        messages: [
+          {
+            role: 'system',
+            content: `You are an elite VC analyst producing a Deal Intelligence Report. Given a call transcript, startup data, and VC thesis, produce a comprehensive structured analysis. Be evidence-based and cite transcript quotes where applicable. Scores should be 0-100. For founderAnalysis, evaluate dimensions: Domain Expertise, Communication Clarity, Vision & Ambition, Coachability, Technical Depth, and Market Understanding. For questionCoverage areas, evaluate: Team & Founders, Product & Technology, Market & Competition, Business Model & Unit Economics, Traction & Metrics, Fundraising & Use of Funds. Return valid JSON only.`,
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              companyName,
+              callDate,
+              vcThesis,
+              startupData: submissionData,
+              existingFitEvaluation: fitEvaluation,
+              callSummary: summaryRow ? {
+                overallSummary: summaryRow.overall_summary,
+                keyPoints: summaryRow.key_points,
+                actionItems: summaryRow.action_items,
+                concerns: summaryRow.concerns,
+                nextSteps: summaryRow.next_steps,
+                founderImpressions: summaryRow.founder_impressions,
+              } : null,
+              transcript: truncatedTranscript,
+            }),
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error('[INTELLIGENCE REPORT] OpenAI error:', response.status, errBody);
+      return c.json({ success: false, error: `AI generation failed (HTTP ${response.status})` }, 500);
+    }
+
+    const aiResult = await response.json();
+    const content = aiResult?.choices?.[0]?.message?.content;
+    if (!content) {
+      return c.json({ success: false, error: 'Empty AI response' }, 500);
+    }
+
+    let report: Record<string, unknown>;
+    try {
+      report = JSON.parse(content);
+    } catch {
+      console.error('[INTELLIGENCE REPORT] Failed to parse AI response:', content.substring(0, 500));
+      return c.json({ success: false, error: 'Invalid AI response format' }, 500);
+    }
+
+    // Upsert into call_intelligence_reports
+    const { error: upsertError } = await db
+      .from('call_intelligence_reports')
+      .upsert({
+        call_id: callId,
+        owner_user_id: user.id,
+        report,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'call_id' });
+
+    if (upsertError) {
+      console.error('[INTELLIGENCE REPORT] Upsert error:', upsertError);
+      // Still return the report even if caching failed
+    }
+
+    return c.json({ success: true, report, cached: false });
+  } catch (error) {
+    console.error('[INTELLIGENCE REPORT GENERATE] Error:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
 // Get favorite submissions for the authenticated VC on a form
 app.get("/make-server-26821bbd/forms/:formId/favorites", async (c) => {
   try {
@@ -3798,6 +4621,341 @@ app.get("/make-server-26821bbd/forms", async (c) => {
     return c.json({ success: true, forms: mappedForms });
   } catch (error) {
     console.error('[GET FORMS] Error fetching forms:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ========================================
+// PORTFOLIO CRUD
+// ========================================
+
+// GET /portfolio — list all portfolio companies for the authenticated user
+app.get("/make-server-26821bbd/portfolio", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const db = getServiceClient();
+    const { data, error } = await db
+      .from('portfolio_companies')
+      .select('*')
+      .eq('owner_user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[PORTFOLIO GET] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    const companies = (data ?? []).map((row: any) => ({
+      id: row.id,
+      companyName: row.company_name,
+      industry: row.industry,
+      country: row.country,
+      continent: row.continent,
+      fundingStage: row.funding_stage,
+      dealSize: row.deal_size != null ? Number(row.deal_size) : null,
+      investmentDate: row.investment_date,
+      valuation: row.valuation != null ? Number(row.valuation) : null,
+      equityPercent: row.equity_percent != null ? Number(row.equity_percent) : null,
+      status: row.status,
+      submissionId: row.submission_id,
+      notes: row.notes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return c.json({ success: true, companies });
+  } catch (error) {
+    console.error('[PORTFOLIO GET] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// POST /portfolio — add a new portfolio company
+app.post("/make-server-26821bbd/portfolio", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const body = await c.req.json();
+    const db = getServiceClient();
+
+    const { data, error } = await db
+      .from('portfolio_companies')
+      .insert({
+        owner_user_id: user.id,
+        company_name: body.companyName,
+        industry: body.industry || null,
+        country: body.country || null,
+        continent: body.continent || null,
+        funding_stage: body.fundingStage || null,
+        deal_size: body.dealSize != null ? body.dealSize : null,
+        investment_date: body.investmentDate || null,
+        valuation: body.valuation != null ? body.valuation : null,
+        equity_percent: body.equityPercent != null ? body.equityPercent : null,
+        status: body.status || 'active',
+        submission_id: body.submissionId || null,
+        notes: body.notes || null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[PORTFOLIO ADD] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    return c.json({
+      success: true,
+      company: {
+        id: data.id,
+        companyName: data.company_name,
+        industry: data.industry,
+        country: data.country,
+        continent: data.continent,
+        fundingStage: data.funding_stage,
+        dealSize: data.deal_size != null ? Number(data.deal_size) : null,
+        investmentDate: data.investment_date,
+        valuation: data.valuation != null ? Number(data.valuation) : null,
+        equityPercent: data.equity_percent != null ? Number(data.equity_percent) : null,
+        status: data.status,
+        submissionId: data.submission_id,
+        notes: data.notes,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error('[PORTFOLIO ADD] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// PUT /portfolio/:id — update a portfolio company
+app.put("/make-server-26821bbd/portfolio/:id", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const companyId = c.req.param('id');
+    const body = await c.req.json();
+    const db = getServiceClient();
+
+    const updates: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (body.companyName !== undefined) updates.company_name = body.companyName;
+    if (body.industry !== undefined) updates.industry = body.industry || null;
+    if (body.country !== undefined) updates.country = body.country || null;
+    if (body.continent !== undefined) updates.continent = body.continent || null;
+    if (body.fundingStage !== undefined) updates.funding_stage = body.fundingStage || null;
+    if (body.dealSize !== undefined) updates.deal_size = body.dealSize;
+    if (body.investmentDate !== undefined) updates.investment_date = body.investmentDate || null;
+    if (body.valuation !== undefined) updates.valuation = body.valuation;
+    if (body.equityPercent !== undefined) updates.equity_percent = body.equityPercent;
+    if (body.status !== undefined) updates.status = body.status;
+    if (body.submissionId !== undefined) updates.submission_id = body.submissionId || null;
+    if (body.notes !== undefined) updates.notes = body.notes || null;
+
+    const { data, error } = await db
+      .from('portfolio_companies')
+      .update(updates)
+      .eq('id', companyId)
+      .eq('owner_user_id', user.id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[PORTFOLIO UPDATE] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    return c.json({
+      success: true,
+      company: {
+        id: data.id,
+        companyName: data.company_name,
+        industry: data.industry,
+        country: data.country,
+        continent: data.continent,
+        fundingStage: data.funding_stage,
+        dealSize: data.deal_size != null ? Number(data.deal_size) : null,
+        investmentDate: data.investment_date,
+        valuation: data.valuation != null ? Number(data.valuation) : null,
+        equityPercent: data.equity_percent != null ? Number(data.equity_percent) : null,
+        status: data.status,
+        submissionId: data.submission_id,
+        notes: data.notes,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+      },
+    });
+  } catch (error) {
+    console.error('[PORTFOLIO UPDATE] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// DELETE /portfolio/:id — delete a portfolio company
+app.delete("/make-server-26821bbd/portfolio/:id", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const companyId = c.req.param('id');
+    const db = getServiceClient();
+
+    const { error } = await db
+      .from('portfolio_companies')
+      .delete()
+      .eq('id', companyId)
+      .eq('owner_user_id', user.id);
+
+    if (error) {
+      console.error('[PORTFOLIO DELETE] Error:', error);
+      return c.json({ success: false, error: error.message }, 500);
+    }
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('[PORTFOLIO DELETE] Exception:', error);
+    return c.json({ success: false, error: String(error) }, 500);
+  }
+});
+
+// ========================================
+// PORTFOLIO AI RECOMMENDATIONS
+// ========================================
+
+app.post("/make-server-26821bbd/portfolio/ai-recommendations", async (c) => {
+  try {
+    const user = await getUserFromRequest(c);
+    if (!user) return c.json({ success: false, error: 'Unauthorized' }, 401);
+
+    const db = getServiceClient();
+
+    // 1. Fetch portfolio
+    const { data: portfolio } = await db
+      .from('portfolio_companies')
+      .select('*')
+      .eq('owner_user_id', user.id);
+
+    // 2. Fetch VC thesis/criteria
+    const { data: criteriaRows } = await db
+      .from('vc_criteria')
+      .select('criteria')
+      .eq('user_id', user.id)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+
+    const thesis = criteriaRows?.[0]?.criteria ?? null;
+
+    // 3. Fetch recent form submissions (get user's forms first, then their submissions)
+    const { data: userForms } = await db
+      .from('forms')
+      .select('id')
+      .eq('user_id', user.id);
+
+    let submissions: any[] = [];
+    if (userForms && userForms.length > 0) {
+      const formIds = userForms.map((f: any) => f.id);
+      const { data: subs } = await db
+        .from('form_submissions')
+        .select('*')
+        .in('form_id', formIds)
+        .order('submitted_at', { ascending: false })
+        .limit(50);
+      submissions = subs ?? [];
+    }
+
+    // 4. Build OpenAI prompt
+    const portfolioSummary = (portfolio ?? []).map((p: any) => ({
+      name: p.company_name,
+      industry: p.industry,
+      country: p.country,
+      continent: p.continent,
+      stage: p.funding_stage,
+      dealSize: p.deal_size,
+      status: p.status,
+    }));
+
+    const applicantSummaries = submissions.map((s: any) => {
+      const data = s.data ?? s.answers ?? {};
+      return {
+        submissionId: s.id ?? s.submission_id,
+        companyName: data.company_name ?? data.companyName ?? data['Company Name'] ?? 'Unknown',
+        answers: data,
+        submittedAt: s.submitted_at,
+      };
+    });
+
+    const systemPrompt = `You are a VC portfolio advisor. Given a VC's current portfolio, thesis, and a list of startup applicants, recommend the top 3-5 best next investments.
+
+Consider:
+- Portfolio diversification (industry, geography, funding stage)
+- Thesis alignment
+- Portfolio gaps that should be filled
+
+Return a JSON array of recommendations. Each recommendation should have:
+- "companyName": string
+- "submissionId": string
+- "rationale": string (2-3 sentences explaining why this is a good fit)
+- "fitScore": number (1-10)
+- "diversificationBenefit": string (what gap does this fill)
+
+Return ONLY the JSON array, no other text.`;
+
+    const userPrompt = `Current Portfolio (${portfolioSummary.length} companies):
+${JSON.stringify(portfolioSummary, null, 2)}
+
+VC Thesis/Criteria:
+${thesis ? JSON.stringify(thesis, null, 2) : 'No thesis defined yet.'}
+
+Recent Applicants (${applicantSummaries.length}):
+${JSON.stringify(applicantSummaries, null, 2)}`;
+
+    const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
+    if (!OPENAI_API_KEY) {
+      return c.json({ success: false, error: 'OpenAI API key not configured' }, 500);
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 2000,
+      }),
+    });
+
+    if (!openaiResponse.ok) {
+      const errText = await openaiResponse.text();
+      console.error('[PORTFOLIO AI] OpenAI error:', errText);
+      return c.json({ success: false, error: 'Failed to get AI recommendations' }, 500);
+    }
+
+    const openaiResult = await openaiResponse.json();
+    const content = openaiResult.choices?.[0]?.message?.content ?? '[]';
+
+    let recommendations: any[];
+    try {
+      const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      recommendations = JSON.parse(cleaned);
+    } catch {
+      console.error('[PORTFOLIO AI] Failed to parse recommendations:', content);
+      recommendations = [];
+    }
+
+    return c.json({ success: true, recommendations });
+  } catch (error) {
+    console.error('[PORTFOLIO AI] Exception:', error);
     return c.json({ success: false, error: String(error) }, 500);
   }
 });
