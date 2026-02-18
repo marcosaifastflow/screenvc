@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
-import { ArrowLeft, Calendar, FileText, Heart } from 'lucide-react';
+import { Calendar, FileText, Heart } from 'lucide-react';
 import {
   getForm,
   getFormFavorites,
@@ -211,24 +211,6 @@ export function FormResultsPage({
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="bg-muted/30 border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="size-10 rounded-full bg-primary/10 flex items-center justify-center">
-              <FileText className="size-5 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-2xl">View Form Results</h1>
-              <p className="text-sm text-muted-foreground">{formName}</p>
-            </div>
-          </div>
-          <Button variant="outline" onClick={onBackToHub}>
-            <ArrowLeft className="size-4 mr-2" />
-            Back to Hub
-          </Button>
-        </div>
-      </div>
-
       <div className="max-w-7xl mx-auto px-6 py-8">
         {isLoading && (
           <Card className="p-8 text-center">

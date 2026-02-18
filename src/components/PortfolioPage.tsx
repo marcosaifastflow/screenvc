@@ -38,7 +38,6 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import {
-  ArrowLeft,
   Plus,
   Pencil,
   Trash2,
@@ -67,16 +66,16 @@ interface PortfolioPageProps {
 }
 
 const COLORS = [
-  'hsl(var(--chart-1))',
-  'hsl(var(--chart-2))',
-  'hsl(var(--chart-3))',
-  'hsl(var(--chart-4))',
-  'hsl(var(--chart-5))',
-  '#8884d8',
-  '#82ca9d',
-  '#ffc658',
-  '#ff7c7c',
-  '#a4de6c',
+  '#6366f1', // indigo
+  '#f59e0b', // amber
+  '#10b981', // emerald
+  '#ef4444', // red
+  '#3b82f6', // blue
+  '#8b5cf6', // violet
+  '#ec4899', // pink
+  '#14b8a6', // teal
+  '#f97316', // orange
+  '#84cc16', // lime
 ];
 
 const FUNDING_STAGES = ['pre-seed', 'seed', 'series-a', 'series-b', 'series-c', 'growth'] as const;
@@ -365,31 +364,19 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
-      <div className="bg-muted/30 border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" onClick={onBackToHub}>
-              <ArrowLeft className="size-5" />
-            </Button>
-            <div className="size-10 rounded-full bg-primary/10 flex items-center justify-center">
-              <Briefcase className="size-5 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-2xl">My Portfolio</h1>
-              <p className="text-sm text-muted-foreground">
-                Track your startup investments and portfolio analytics
-              </p>
-            </div>
+      <div className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold">My Portfolio</h1>
+            <p className="text-sm text-muted-foreground">
+              Track your startup investments and portfolio analytics
+            </p>
           </div>
           <Button onClick={openAddDialog} className="gap-2">
             <Plus className="size-4" />
             Add Company
           </Button>
         </div>
-      </div>
-
-      <div className="max-w-7xl mx-auto px-6 py-8 space-y-8">
         {/* KPI Cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Card className="p-5">
@@ -471,7 +458,11 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
                   <XAxis dataKey="name" tick={{ fontSize: 12 }} />
                   <YAxis allowDecimals={false} />
                   <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="value" fill="hsl(var(--chart-1))" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                    {countryData.map((_, i) => (
+                      <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ChartContainer>
             </Card>
@@ -508,7 +499,11 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
                   <XAxis dataKey="name" tick={{ fontSize: 12 }} />
                   <YAxis allowDecimals={false} />
                   <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="value" fill="hsl(var(--chart-2))" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                    {stageData.map((_, i) => (
+                      <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ChartContainer>
             </Card>
@@ -640,7 +635,7 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
                 AI Investment Recommendations
               </h3>
               <p className="text-sm text-muted-foreground mt-1">
-                Get AI-powered suggestions for your next investment based on portfolio gaps and form applicants.
+                This functionality looks at: your portfolio of companies, your VC's thesis/criteria, and form submissions from startups, to recommend which applicants are the best fit.
               </p>
             </div>
             <Button onClick={handleGetRecommendations} disabled={isLoadingRecs} className="gap-2">
@@ -649,7 +644,7 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
               ) : (
                 <Sparkles className="size-4" />
               )}
-              {isLoadingRecs ? 'Analyzing...' : 'Get AI Recommendations'}
+              {isLoadingRecs ? 'Analyzing...' : 'Find Opportunities to Fill Your Portfolio Gap'}
             </Button>
           </div>
 

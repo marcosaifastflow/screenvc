@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft,
   CalendarClock,
   ExternalLink,
   Bot,
@@ -281,19 +280,6 @@ export function CallsPage({ accessToken, onBackToHub, onOpenApplication, onOpenI
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="bg-muted/30 border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl">Calls</h1>
-            <p className="text-sm text-muted-foreground">Track upcoming and past founder calls</p>
-          </div>
-          <Button variant="outline" onClick={onBackToHub}>
-            <ArrowLeft className="size-4 mr-2" />
-            Back to Hub
-          </Button>
-        </div>
-      </div>
-
       <div className="max-w-7xl mx-auto px-6 py-8">
         {isLoading ? (
           <Card className="p-8 text-center">

@@ -100,9 +100,7 @@ export function VCHubPage({
       <div className="bg-muted/30 border-b border-border">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="size-10 rounded-full bg-primary/10 flex items-center justify-center">
-              <Sparkles className="size-5 text-primary" />
-            </div>
+            <img src="/logo-yellow.png" alt="ScreenVC" className="h-12" />
             <div>
               <h1 className="text-2xl">VC Hub</h1>
               <p className="text-sm text-muted-foreground">

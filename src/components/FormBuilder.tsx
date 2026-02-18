@@ -4,7 +4,7 @@ import { Card } from './ui/card';
 import { Input } from './ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { ArrowLeft, Plus, Trash2, GripVertical, Sparkles, Eye, Code, LogOut, User } from 'lucide-react';
+import { Plus, Trash2, GripVertical, Sparkles, Eye, Code } from 'lucide-react';
 import { FormPreview } from './FormPreview';
 import { EmbedCode } from './EmbedCode';
 import { ThesisBuilder } from './ThesisBuilder';
@@ -389,29 +389,6 @@ export function FormBuilder({ onBack, onPublish, authState, onLogout }: FormBuil
     <div className="min-h-screen bg-background">
       <div className="border-b border-border bg-background sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between mb-4">
-            <Button variant="ghost" onClick={onBack} className="gap-2">
-              <ArrowLeft className="size-4" />
-              Back
-            </Button>
-
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <Sparkles className="size-5 text-primary" />
-                <span className="font-semibold">ScreenVC</span>
-              </div>
-
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <User className="size-4" />
-                <span>{authState.user?.email}</span>
-                <Button variant="ghost" size="sm" onClick={onLogout} className="gap-2">
-                  <LogOut className="size-4" />
-                  Logout
-                </Button>
-              </div>
-            </div>
-          </div>
-
           <Input
             value={formName}
             onChange={(e) => setFormName(e.target.value)}

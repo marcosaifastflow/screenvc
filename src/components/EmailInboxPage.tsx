@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Mail, Send } from 'lucide-react';
+import { Mail, Send } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
 import { Input } from './ui/input';
@@ -128,19 +128,6 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="bg-muted/30 border-b border-border">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl">Email Inbox</h1>
-            <p className="text-sm text-muted-foreground">Manage outreach and startup responses</p>
-          </div>
-          <Button variant="outline" onClick={onBackToHub}>
-            <ArrowLeft className="size-4 mr-2" />
-            Back to Hub
-          </Button>
-        </div>
-      </div>
-
       <div className="max-w-7xl mx-auto px-6 py-8">
         {isLoading ? (
           <Card className="p-8 text-center">

@@ -5,13 +5,14 @@ import type { FormQuestion, VCThesis } from './components/FormBuilder';
 import { PublishedForm } from './components/PublishedForm';
 import { FormNotFound } from './components/FormNotFound';
 import { AuthPage } from './components/AuthPage';
-import { VCHubPage } from './components/VCHubPage';
+import { DashboardPage } from './components/DashboardPage';
 import { FormResultsPage } from './components/FormResultsPage';
 import { ApplicationDetailsPage } from './components/ApplicationDetailsPage';
 import { EmailInboxPage } from './components/EmailInboxPage';
 import { CallsPage } from './components/CallsPage';
 import { DealIntelligencePage } from './components/DealIntelligencePage';
 import { PortfolioPage } from './components/PortfolioPage';
+import { AuthenticatedLayout } from './components/AuthenticatedLayout';
 import { Toaster } from './components/ui/sonner';
 import { getForm } from './utils/api';
 import { supabase } from './utils/supabase/client';
@@ -30,22 +31,36 @@ interface AuthState {
   user: User | null;
 }
 
+type ViewType =
+  | 'landing'
+  | 'dashboard'
+  | 'hub'
+  | 'builder'
+  | 'results'
+  | 'application'
+  | 'inbox'
+  | 'calls'
+  | 'intelligence'
+  | 'portfolio'
+  | 'published'
+  | 'notfound'
+  | 'auth'
+  | 'loading';
+
+const AUTHENTICATED_VIEWS = new Set<ViewType>([
+  'dashboard',
+  'hub',
+  'builder',
+  'results',
+  'application',
+  'inbox',
+  'calls',
+  'intelligence',
+  'portfolio',
+]);
+
 export default function App() {
-  const [view, setView] = useState<
-    | 'landing'
-    | 'hub'
-    | 'builder'
-    | 'results'
-    | 'application'
-    | 'inbox'
-    | 'calls'
-    | 'intelligence'
-    | 'portfolio'
-    | 'published'
-    | 'notfound'
-    | 'auth'
-    | 'loading'
-  >('loading');
+  const [view, setView] = useState<ViewType>('loading');
 
   const [currentForm, setCurrentForm] = useState<PublishedFormData | null>(null);
   const [notFoundId, setNotFoundId] = useState('');
@@ -57,6 +72,7 @@ export default function App() {
     accessToken: null,
     user: null,
   });
+  const [authReady, setAuthReady] = useState(false);
 
   // --------------------------------
   // Restore Supabase session
@@ -73,19 +89,19 @@ export default function App() {
           accessToken: session.access_token,
           user: session.user,
         });
-        return;
+      } else {
+        setAuthState({
+          isAuthenticated: false,
+          accessToken: null,
+          user: null,
+        });
       }
-
-      setAuthState({
-        isAuthenticated: false,
-        accessToken: null,
-        user: null,
-      });
+      setAuthReady(true);
     };
 
-    supabase.auth.getSession().then(({ data }) => {
-      applySession(data.session ?? null);
-    });
+    // If there's an OAuth code in the URL, wait for onAuthStateChange
+    // to exchange it before marking auth as ready.
+    const hasOAuthCode = new URLSearchParams(window.location.search).has('code');
 
     const {
       data: { subscription },
@@ -100,6 +116,12 @@ export default function App() {
       }
     });
 
+    if (!hasOAuthCode) {
+      supabase.auth.getSession().then(({ data }) => {
+        applySession(data.session ?? null);
+      });
+    }
+
     return () => {
       active = false;
       subscription.unsubscribe();
@@ -110,10 +132,18 @@ export default function App() {
   // QUERY-BASED ROUTER (FIGMA SAFE)
   // --------------------------------
   useEffect(() => {
+    if (!authReady) return;
+
     const route = async () => {
       setCurrentForm(null);
 
+      // Clean up OAuth code param from URL after redirect
       const params = new URLSearchParams(window.location.search);
+      if (params.has('code')) {
+        params.delete('code');
+        const clean = params.toString() ? `?${params.toString()}` : '/';
+        window.history.replaceState({}, '', clean);
+      }
       const formId = params.get('form');
       const viewParam = params.get('view');
       const submissionIdParam = params.get('submission');
@@ -135,14 +165,14 @@ export default function App() {
         return;
       }
 
-      // 2️⃣ Hub (auth required)
-      if (viewParam === 'hub') {
+      // 2️⃣ Dashboard (auth required) — also redirect 'hub' to dashboard
+      if (viewParam === 'dashboard' || viewParam === 'hub') {
         if (!authState.isAuthenticated) {
           setView('auth');
           return;
         }
 
-        setView('hub');
+        setView('dashboard');
         return;
       }
 
@@ -236,7 +266,11 @@ export default function App() {
         return;
       }
 
-      // 9️⃣ Default
+      // 9️⃣ Default — if authenticated, go straight to dashboard
+      if (authState.isAuthenticated) {
+        setView('dashboard');
+        return;
+      }
       setView('landing');
     };
 
@@ -247,7 +281,7 @@ export default function App() {
     return () => {
       window.removeEventListener('popstate', route);
     };
-  }, [authState.isAuthenticated]);
+  }, [authReady, authState.isAuthenticated]);
 
   // --------------------------------
   // Auth Handlers
@@ -257,9 +291,13 @@ export default function App() {
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
+  const handleNavigate = (targetView: string) => {
+    navigate(`?view=${targetView}`);
+  };
+
   const handleAuthSuccess = (accessToken: string, user: User) => {
     setAuthState({ isAuthenticated: true, accessToken, user });
-    navigate('?view=hub');
+    navigate('?view=dashboard');
   };
 
   const handleLogout = async () => {
@@ -289,6 +327,92 @@ export default function App() {
   }
 
   // --------------------------------
+  // Render authenticated views in sidebar layout
+  // --------------------------------
+  const renderAuthenticatedContent = () => {
+    switch (view) {
+      case 'dashboard':
+        return (
+          <DashboardPage
+            userId={authState.user?.id}
+            accessToken={authState.accessToken}
+            onNavigate={handleNavigate}
+          />
+        );
+      case 'builder':
+        return (
+          <FormBuilder
+            onBack={() => navigate('?view=dashboard')}
+            onPublish={handlePublish}
+            authState={authState}
+            onLogout={handleLogout}
+          />
+        );
+      case 'results':
+        return (
+          <FormResultsPage
+            userId={authState.user?.id ?? null}
+            accessToken={authState.accessToken}
+            onBackToHub={() => navigate('?view=dashboard')}
+            onOpenBuilder={() => navigate('?view=builder')}
+            onOpenApplication={(submissionId) =>
+              navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
+            }
+          />
+        );
+      case 'application':
+        return selectedSubmissionId ? (
+          <ApplicationDetailsPage
+            userId={authState.user?.id ?? null}
+            submissionId={selectedSubmissionId}
+            accessToken={authState.accessToken}
+            onBackToResults={() => navigate('?view=results')}
+          />
+        ) : null;
+      case 'inbox':
+        return (
+          <EmailInboxPage
+            accessToken={authState.accessToken}
+            onBackToHub={() => navigate('?view=dashboard')}
+            onOpenApplication={(submissionId) =>
+              navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
+            }
+          />
+        );
+      case 'calls':
+        return (
+          <CallsPage
+            accessToken={authState.accessToken}
+            onBackToHub={() => navigate('?view=dashboard')}
+            onOpenApplication={(submissionId) =>
+              navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
+            }
+            onOpenIntelligence={(callId) =>
+              navigate(`?view=intelligence&call=${encodeURIComponent(callId)}`)
+            }
+          />
+        );
+      case 'intelligence':
+        return selectedCallId ? (
+          <DealIntelligencePage
+            callId={selectedCallId}
+            accessToken={authState.accessToken}
+            onBack={() => navigate('?view=calls')}
+          />
+        ) : null;
+      case 'portfolio':
+        return (
+          <PortfolioPage
+            accessToken={authState.accessToken}
+            onBackToHub={() => navigate('?view=dashboard')}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  // --------------------------------
   // Render
   // --------------------------------
   return (
@@ -296,99 +420,29 @@ export default function App() {
       <Toaster />
 
       {view === 'landing' && (
-        <LandingPage onGetStarted={() => navigate('?view=hub')} />
+        <LandingPage onGetStarted={() => navigate('?view=dashboard')} />
       )}
 
-      {view === 'hub' && (
-        <VCHubPage
+      {AUTHENTICATED_VIEWS.has(view) && (
+        <AuthenticatedLayout
+          currentView={view}
           userEmail={authState.user?.email}
-          accessToken={authState.accessToken}
-          onOpenBuilder={() => navigate('?view=builder')}
-          onOpenResults={() => navigate('?view=results')}
-          onOpenInbox={() => navigate('?view=inbox')}
-          onOpenCalls={() => navigate('?view=calls')}
-          onOpenPortfolio={() => navigate('?view=portfolio')}
+          onNavigate={handleNavigate}
           onLogout={handleLogout}
-        />
-      )}
-
-      {view === 'builder' && (
-        <FormBuilder
-          onBack={() => navigate('?view=hub')}
-          onPublish={handlePublish}
-          authState={authState}
-          onLogout={handleLogout}
-        />
+        >
+          {renderAuthenticatedContent()}
+        </AuthenticatedLayout>
       )}
 
       {view === 'published' && currentForm && (
         <PublishedForm
           {...currentForm}
-          onBackToBuilder={() => navigate('?view=hub')}
+          onBackToBuilder={() => navigate('?view=dashboard')}
           isPublicView
         />
       )}
 
       {view === 'notfound' && <FormNotFound formId={notFoundId} />}
-
-      {view === 'results' && (
-        <FormResultsPage
-          userId={authState.user?.id ?? null}
-          accessToken={authState.accessToken}
-          onBackToHub={() => navigate('?view=hub')}
-          onOpenBuilder={() => navigate('?view=builder')}
-          onOpenApplication={(submissionId) =>
-            navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
-          }
-        />
-      )}
-
-      {view === 'application' && selectedSubmissionId && (
-        <ApplicationDetailsPage
-          userId={authState.user?.id ?? null}
-          submissionId={selectedSubmissionId}
-          accessToken={authState.accessToken}
-          onBackToResults={() => navigate('?view=results')}
-        />
-      )}
-
-      {view === 'inbox' && (
-        <EmailInboxPage
-          accessToken={authState.accessToken}
-          onBackToHub={() => navigate('?view=hub')}
-          onOpenApplication={(submissionId) =>
-            navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
-          }
-        />
-      )}
-
-      {view === 'calls' && (
-        <CallsPage
-          accessToken={authState.accessToken}
-          onBackToHub={() => navigate('?view=hub')}
-          onOpenApplication={(submissionId) =>
-            navigate(`?view=application&submission=${encodeURIComponent(submissionId)}`)
-          }
-          onOpenIntelligence={(callId) =>
-            navigate(`?view=intelligence&call=${encodeURIComponent(callId)}`)
-          }
-        />
-      )}
-
-      {view === 'intelligence' && selectedCallId && (
-        <DealIntelligencePage
-          callId={selectedCallId}
-          accessToken={authState.accessToken}
-          onBack={() => navigate('?view=calls')}
-        />
-      )}
-
-      {view === 'portfolio' && (
-        <PortfolioPage
-          accessToken={authState.accessToken}
-          onBackToHub={() => navigate('?view=hub')}
-        />
-      )}
 
       {view === 'auth' && <AuthPage onAuthSuccess={handleAuthSuccess} />}
     </div>
