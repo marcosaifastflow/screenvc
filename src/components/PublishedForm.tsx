@@ -14,7 +14,7 @@ import { Button } from './ui/button';
 import type { FormQuestion, VCThesis } from './FormBuilder';
 import { Sparkles, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { submitForm } from '../utils/api';
+import { submitForm, uploadSubmissionFile } from '../utils/api';
 
 type FormValue = string | string[];
 
@@ -47,9 +47,11 @@ export function PublishedForm({
   questions,
 }: PublishedFormProps) {
   const [formData, setFormData] = useState<Record<string, FormValue>>({});
+  const [fileData, setFileData] = useState<Record<string, File | null>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitted, setSubmitted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
 
   const normalizedQuestions = useMemo(
     () =>
@@ -68,6 +70,18 @@ export function PublishedForm({
       const rawValue = formData[question.id];
       const stringValue = getStringValue(rawValue).trim();
       const arrayValue = Array.isArray(rawValue) ? rawValue : [];
+
+      if (question.type === 'file') {
+        const file = fileData[question.id];
+        if (question.required && !file) {
+          nextErrors[question.id] = 'This field is required.';
+          return;
+        }
+        if (file && file.size > 10 * 1024 * 1024) {
+          nextErrors[question.id] = 'File must be under 10 MB.';
+        }
+        return;
+      }
 
       if (question.required) {
         if (question.type === 'select' && question.allowMultiple) {
@@ -132,8 +146,38 @@ export function PublishedForm({
     setIsSubmitting(true);
 
     try {
+      // Upload files first
+      const fileQuestions = normalizedQuestions.filter((q) => q.type === 'file');
+      const fileUrls: Record<string, string> = {};
+
+      if (fileQuestions.length > 0) {
+        setIsUploading(true);
+        for (const fq of fileQuestions) {
+          const file = fileData[fq.id];
+          if (!file) continue;
+
+          const uploadResult = await uploadSubmissionFile(formId, file);
+          if (!uploadResult.success) {
+            toast.error(`Failed to upload ${file.name}: ${uploadResult.error}`);
+            setIsUploading(false);
+            setIsSubmitting(false);
+            return;
+          }
+          fileUrls[fq.id] = uploadResult.url;
+        }
+        setIsUploading(false);
+      }
+
       const payload: Record<string, FormValue> = {};
       normalizedQuestions.forEach((question) => {
+        if (question.type === 'file') {
+          const url = fileUrls[question.id];
+          if (url) {
+            payload[question.label] = url;
+          }
+          return;
+        }
+
         const value = formData[question.id];
         if (Array.isArray(value)) {
           if (value.length > 0) {
@@ -181,9 +225,9 @@ export function PublishedForm({
   }
 
   return (
-    <div className="min-h-screen py-12 px-6">
+    <div className="min-h-screen py-8 px-4 md:py-12 md:px-6">
       <div className="max-w-3xl mx-auto">
-        <Card className="p-8">
+        <Card className="p-4 md:p-8">
           <div className="mb-6 border-b pb-4">
             <div className="flex items-center gap-2 mb-2">
               <Sparkles className="size-5 text-primary" />
@@ -250,6 +294,25 @@ export function PublishedForm({
                         ))}
                       </SelectContent>
                     </Select>
+                  ) : question.type === 'file' ? (
+                    <div className="border border-border rounded-md p-3">
+                      <input
+                        type="file"
+                        accept={question.accept || undefined}
+                        className="text-sm"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] ?? null;
+                          setFileData((prev) => ({ ...prev, [question.id]: file }));
+                          setErrors((prev) => ({ ...prev, [question.id]: '' }));
+                        }}
+                      />
+                      {question.accept && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Accepted: {question.accept}
+                        </p>
+                      )}
+                      <p className="text-xs text-muted-foreground mt-1">Max 10 MB</p>
+                    </div>
                   ) : question.type === 'number' ? (
                     <Input
                       type="text"
@@ -291,7 +354,7 @@ export function PublishedForm({
               className="w-full"
               disabled={isSubmitting}
             >
-              {isSubmitting ? 'Submitting...' : 'Submit Application'}
+              {isUploading ? 'Uploading files...' : isSubmitting ? 'Submitting...' : 'Submit Application'}
             </Button>
           </form>
         </Card>

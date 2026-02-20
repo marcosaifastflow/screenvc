@@ -187,7 +187,7 @@ export function DashboardPage({ userId, accessToken, onNavigate }: DashboardPage
   }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
+    <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Dashboard</h1>
         <p className="text-sm text-muted-foreground">Overview of your deal flow pipeline</p>

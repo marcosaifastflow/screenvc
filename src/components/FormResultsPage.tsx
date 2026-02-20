@@ -211,7 +211,7 @@ export function FormResultsPage({
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="max-w-7xl mx-auto px-4 py-6 md:px-6 md:py-8">
         {isLoading && (
           <Card className="p-8 text-center">
             <p className="text-muted-foreground">Loading submissions...</p>
@@ -304,7 +304,7 @@ export function FormResultsPage({
 
                     return (
                       <Card key={submission.submissionId} className="p-4">
-                        <div className="flex items-start justify-between gap-3 mb-2">
+                        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-2">
                           <div className="flex items-center gap-2">
                             <h3 className="font-medium">{companyName}</h3>
                             <Button
@@ -323,7 +323,7 @@ export function FormResultsPage({
                               />
                             </Button>
                           </div>
-                          <div className="text-right flex flex-col items-end gap-2">
+                          <div className="flex flex-col sm:items-end gap-2">
                             <p className="text-sm text-muted-foreground flex items-center gap-2">
                               <Calendar className="size-4" />
                               {new Date(submission.submittedAt).toLocaleString()}

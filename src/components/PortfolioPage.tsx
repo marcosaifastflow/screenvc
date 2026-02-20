@@ -364,56 +364,56 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-6 py-8 space-y-8">
-        <div className="flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 py-6 md:px-6 md:py-8 space-y-8">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold">My Portfolio</h1>
             <p className="text-sm text-muted-foreground">
               Track your startup investments and portfolio analytics
             </p>
           </div>
-          <Button onClick={openAddDialog} className="gap-2">
+          <Button onClick={openAddDialog} className="gap-2 self-start sm:self-auto">
             <Plus className="size-4" />
             Add Company
           </Button>
         </div>
         {/* KPI Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Card className="p-5">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="size-9 rounded-lg bg-green-500/10 flex items-center justify-center">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+          <Card className="p-3 md:p-5">
+            <div className="flex items-center gap-2 md:gap-3 mb-2">
+              <div className="size-8 md:size-9 rounded-lg bg-green-500/10 flex items-center justify-center">
                 <DollarSign className="size-4 text-green-600" />
               </div>
-              <p className="text-sm text-muted-foreground">Total Invested</p>
+              <p className="text-xs md:text-sm text-muted-foreground">Total Invested</p>
             </div>
-            <p className="text-2xl font-semibold">{formatCurrency(kpis.total)}</p>
+            <p className="text-xl md:text-2xl font-semibold">{formatCurrency(kpis.total)}</p>
           </Card>
-          <Card className="p-5">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="size-9 rounded-lg bg-blue-500/10 flex items-center justify-center">
+          <Card className="p-3 md:p-5">
+            <div className="flex items-center gap-2 md:gap-3 mb-2">
+              <div className="size-8 md:size-9 rounded-lg bg-blue-500/10 flex items-center justify-center">
                 <Building2 className="size-4 text-blue-600" />
               </div>
-              <p className="text-sm text-muted-foreground">Companies</p>
+              <p className="text-xs md:text-sm text-muted-foreground">Companies</p>
             </div>
-            <p className="text-2xl font-semibold">{kpis.count}</p>
+            <p className="text-xl md:text-2xl font-semibold">{kpis.count}</p>
           </Card>
-          <Card className="p-5">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="size-9 rounded-lg bg-purple-500/10 flex items-center justify-center">
+          <Card className="p-3 md:p-5">
+            <div className="flex items-center gap-2 md:gap-3 mb-2">
+              <div className="size-8 md:size-9 rounded-lg bg-purple-500/10 flex items-center justify-center">
                 <TrendingUp className="size-4 text-purple-600" />
               </div>
-              <p className="text-sm text-muted-foreground">Avg Deal Size</p>
+              <p className="text-xs md:text-sm text-muted-foreground">Avg Deal Size</p>
             </div>
-            <p className="text-2xl font-semibold">{formatCurrency(kpis.avg)}</p>
+            <p className="text-xl md:text-2xl font-semibold">{formatCurrency(kpis.avg)}</p>
           </Card>
-          <Card className="p-5">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="size-9 rounded-lg bg-orange-500/10 flex items-center justify-center">
+          <Card className="p-3 md:p-5">
+            <div className="flex items-center gap-2 md:gap-3 mb-2">
+              <div className="size-8 md:size-9 rounded-lg bg-orange-500/10 flex items-center justify-center">
                 <Briefcase className="size-4 text-orange-600" />
               </div>
-              <p className="text-sm text-muted-foreground">Status</p>
+              <p className="text-xs md:text-sm text-muted-foreground">Status</p>
             </div>
-            <p className="text-sm">
+            <p className="text-xs md:text-sm">
               <span className="text-green-600 font-medium">{kpis.active} active</span>
               {' / '}
               <span className="text-blue-600 font-medium">{kpis.exited} exited</span>
@@ -511,8 +511,8 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
         )}
 
         {/* Sort & Filter toolbar */}
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-3 md:gap-4 overflow-x-auto">
+          <div className="flex items-center gap-2 shrink-0">
             <ArrowUpDown className="size-4 text-muted-foreground" />
             <span className="text-sm text-muted-foreground">Sort:</span>
             {(['companyName', 'dealSize', 'fundingStage', 'country', 'investmentDate'] as SortField[]).map(
@@ -556,7 +556,7 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
         </div>
 
         {/* Portfolio Table */}
-        <Card>
+        <Card className="overflow-x-auto">
           {displayCompanies.length === 0 ? (
             <div className="p-12 text-center text-muted-foreground">
               {companies.length === 0
@@ -628,7 +628,7 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
 
         {/* AI Recommendations */}
         <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
             <div>
               <h3 className="font-medium flex items-center gap-2">
                 <Sparkles className="size-4 text-primary" />
@@ -638,13 +638,13 @@ export function PortfolioPage({ accessToken, onBackToHub }: PortfolioPageProps) 
                 This functionality looks at: your portfolio of companies, your VC's thesis/criteria, and form submissions from startups, to recommend which applicants are the best fit.
               </p>
             </div>
-            <Button onClick={handleGetRecommendations} disabled={isLoadingRecs} className="gap-2">
+            <Button onClick={handleGetRecommendations} disabled={isLoadingRecs} className="gap-2 self-start sm:self-auto shrink-0">
               {isLoadingRecs ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : (
                 <Sparkles className="size-4" />
               )}
-              {isLoadingRecs ? 'Analyzing...' : 'Find Opportunities to Fill Your Portfolio Gap'}
+              {isLoadingRecs ? 'Analyzing...' : 'Find Opportunities'}
             </Button>
           </div>
 

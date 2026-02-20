@@ -128,7 +128,7 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="max-w-7xl mx-auto px-4 py-6 md:px-6 md:py-8">
         {isLoading ? (
           <Card className="p-8 text-center">
             <p className="text-muted-foreground">Loading inbox...</p>
@@ -186,7 +186,7 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
                   {isMessagesLoading ? (
                     <p className="text-muted-foreground">Loading messages...</p>
                   ) : (
-                    <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
+                    <div className="space-y-3 max-h-[50vh] md:max-h-[320px] overflow-y-auto pr-1">
                       {messages.map((message) => (
                         <div
                           key={message.id}

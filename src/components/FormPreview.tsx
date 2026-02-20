@@ -75,6 +75,21 @@ export function FormPreview({ formName, questions }: FormPreviewProps) {
                     ))}
                   </SelectContent>
                 </Select>
+              ) : question.type === 'file' ? (
+                <div className="border border-border rounded-md p-3 bg-muted/30">
+                  <input
+                    type="file"
+                    accept={question.accept || undefined}
+                    disabled
+                    className="text-sm text-muted-foreground"
+                  />
+                  {question.accept && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Accepted: {question.accept}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1">Max 10 MB</p>
+                </div>
               ) : (
                 <Input
                   type={question.type === 'number' ? 'text' : question.type}

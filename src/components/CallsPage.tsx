@@ -280,7 +280,7 @@ export function CallsPage({ accessToken, onBackToHub, onOpenApplication, onOpenI
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="max-w-7xl mx-auto px-4 py-6 md:px-6 md:py-8">
         {isLoading ? (
           <Card className="p-8 text-center">
             <p className="text-muted-foreground">Loading calls...</p>

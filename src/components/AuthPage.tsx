@@ -138,7 +138,7 @@ export function AuthPage({ onAuthSuccess }: AuthPageProps) {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-2 mb-4">
-            <img src="/logo-yellow.png" alt="ScreenVC" className="h-20" />
+            <img src="/logo-yellow.png" alt="ScreenVC" className="h-14 md:h-20" />
           </div>
           <p className="text-muted-foreground">
             AI-powered application forms for VCs

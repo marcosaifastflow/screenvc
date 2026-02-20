@@ -218,24 +218,24 @@ export function DealIntelligencePage({ callId, accessToken, onBack }: DealIntell
     <div className="min-h-screen bg-background flex flex-col">
       {/* Header Bar */}
       <div className="bg-muted/30 border-b border-border shrink-0">
-        <div className="max-w-[1400px] mx-auto px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" onClick={onBack}>
+        <div className="max-w-[1400px] mx-auto px-4 md:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 md:gap-4 min-w-0">
+            <Button variant="ghost" size="sm" onClick={onBack} className="shrink-0">
               <ArrowLeft className="size-4 mr-1" />
               Back
             </Button>
-            <Separator orientation="vertical" className="h-6" />
-            <div>
-              <span className="font-semibold">{header.companyName}</span>
+            <Separator orientation="vertical" className="h-6 hidden sm:block" />
+            <div className="min-w-0">
+              <span className="font-semibold truncate">{header.companyName}</span>
               {header.stage && (
-                <span className="text-muted-foreground text-sm ml-2">{header.stage}</span>
+                <span className="text-muted-foreground text-sm ml-2 hidden sm:inline">{header.stage}</span>
               )}
               {header.sector && (
-                <span className="text-muted-foreground text-sm ml-2">{header.sector}</span>
+                <span className="text-muted-foreground text-sm ml-2 hidden sm:inline">{header.sector}</span>
               )}
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <span className="text-3xl font-bold">{header.thesisAlignmentScore}</span>
             <span className="text-xs text-muted-foreground leading-tight">
               Thesis<br />Alignment

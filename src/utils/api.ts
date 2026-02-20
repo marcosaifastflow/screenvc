@@ -2424,6 +2424,35 @@ export async function getForm(formId: string, accessToken?: string | null) {
 }
 
 // ========================================
+// FILE UPLOAD (SUPABASE STORAGE)
+// ========================================
+
+export async function uploadSubmissionFile(formId: string, file: File) {
+  try {
+    const uniqueName = `${crypto.randomUUID()}_${file.name}`;
+    const path = `${formId}/${uniqueName}`;
+
+    const { error } = await supabase.storage
+      .from('form-uploads')
+      .upload(path, file);
+
+    if (error) {
+      console.error('[UPLOAD FILE ERROR]', error);
+      return { success: false, error: error.message, url: '' };
+    }
+
+    const { data: urlData } = supabase.storage
+      .from('form-uploads')
+      .getPublicUrl(path);
+
+    return { success: true, url: urlData.publicUrl };
+  } catch (error) {
+    console.error('[UPLOAD FILE EXCEPTION]', error);
+    return { success: false, error: String(error), url: '' };
+  }
+}
+
+// ========================================
 // PUBLIC SUBMISSION
 // ========================================
 

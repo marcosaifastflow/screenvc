@@ -12,15 +12,15 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
       {/* Navigation */}
       <nav className=" bg-primary backdrop-blur sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between bg-[#00000000]">
-          <div className="flex items-center gap-2 mb-2">
-            <img src="/logo-black.png" alt="ScreenVC" className="h-20" />
+          <div className="flex items-center gap-2">
+            <img src="/logo-black.png" alt="ScreenVC" className="h-12 md:h-20" />
           </div>
           <Button onClick={onGetStarted} className="bg-black text-white font-semibold hover:bg-black hover:text-white hover:scale-105 transition-transform">Get Started</Button>
         </div>
       </nav>
 
       {/* Hero Section */}
-      <section className="bg-primary mx-auto px-6 py-20 md:py-28">
+      <section className="bg-primary mx-auto px-4 py-12 md:px-6 md:py-28">
         <div className="text-center max-w-4xl mx-auto">
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/5 border border-primary/10 mb-6">
             <Brain className="size-4 text-primary" />
@@ -28,7 +28,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
             <span className="text-sm font-bold">AI-Powered Deal Screening</span>
           </div>
           
-          <h1 className="text-5xl md:text-6xl font-bold mb-6 leading-tight">
+          <h1 className="text-3xl md:text-5xl lg:text-6xl font-bold mb-6 leading-tight">
             Stop Wasting Time on<br />
             <span className="font-bold">Low-Quality Deals</span>
           </h1>

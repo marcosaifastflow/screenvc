@@ -13,6 +13,10 @@ import { toast } from 'sonner';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { getForm, getSavedThesisCriteria, getUserPrimaryForm, saveThesisCriteria } from '../utils/api';
 import { clearStoredFormId, getStoredFormId, setStoredFormId } from '../utils/formStorage';
+import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
+import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
+import { CSS } from '@dnd-kit/utilities';
 
 interface FormBuilderProps {
   onBack: () => void;
@@ -32,12 +36,13 @@ interface FormBuilderProps {
 
 export interface FormQuestion {
   id: string;
-  type: 'text' | 'textarea' | 'email' | 'url' | 'number' | 'select';
+  type: 'text' | 'textarea' | 'email' | 'url' | 'number' | 'select' | 'file';
   label: string;
   placeholder?: string;
   required: boolean;
   options?: string[];
   allowMultiple?: boolean;
+  accept?: string;
   locked?: boolean;
 }
 
@@ -93,6 +98,7 @@ const normalizeQuestion = (question: FormQuestion): FormQuestion => {
         ? (question.options ?? ['Option 1']).filter((option) => option.trim().length > 0)
         : undefined,
     allowMultiple: normalizedType === 'select' ? Boolean(question.allowMultiple) : false,
+    accept: normalizedType === 'file' ? (question.accept ?? '') : undefined,
     locked: Boolean(question.locked),
   };
 };
@@ -118,6 +124,161 @@ const DEFAULT_THESIS: VCThesis = {
   geography: [],
   customCriteria: '',
 };
+
+interface SortableQuestionCardProps {
+  question: FormQuestion;
+  index: number;
+  updateQuestion: (id: string, updates: Partial<FormQuestion>) => void;
+  deleteQuestion: (id: string) => void;
+  addSelectOption: (questionId: string) => void;
+  updateSelectOption: (questionId: string, optionIndex: number, value: string) => void;
+  removeSelectOption: (questionId: string, optionIndex: number) => void;
+}
+
+function SortableQuestionCard({
+  question,
+  index,
+  updateQuestion,
+  deleteQuestion,
+  addSelectOption,
+  updateSelectOption,
+  removeSelectOption,
+}: SortableQuestionCardProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: question.id,
+    disabled: Boolean(question.locked),
+  });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 50 : 'auto',
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="mb-4">
+      <Card className="p-4 bg-muted/30">
+        <div className="flex gap-3">
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            style={{ touchAction: 'none' }}
+            className="cursor-grab active:cursor-grabbing"
+          >
+            <GripVertical className="size-4" />
+          </button>
+
+        <div className="flex-1 space-y-3">
+          <Input
+            value={question.label}
+            disabled={Boolean(question.locked)}
+            onChange={(e) => updateQuestion(question.id, { label: e.target.value })}
+          />
+
+          <Input
+            value={question.placeholder ?? ''}
+            placeholder="Placeholder"
+            onChange={(e) => updateQuestion(question.id, { placeholder: e.target.value })}
+          />
+
+          <div className="grid md:grid-cols-2 gap-3">
+            <Select
+              value={question.type}
+              onValueChange={(value) =>
+                updateQuestion(question.id, {
+                  type: value as FormQuestion['type'],
+                })
+              }
+              disabled={Boolean(question.locked)}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="text">Text</SelectItem>
+                <SelectItem value="textarea">Long Text</SelectItem>
+                <SelectItem value="email">Email</SelectItem>
+                <SelectItem value="url">URL</SelectItem>
+                <SelectItem value="number">Number</SelectItem>
+                <SelectItem value="select">Select</SelectItem>
+                <SelectItem value="file">File Upload</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {question.type === 'select' && (
+              <Select
+                value={question.allowMultiple ? 'multiple' : 'single'}
+                onValueChange={(value) =>
+                  updateQuestion(question.id, {
+                    allowMultiple: value === 'multiple',
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="single">Single select</SelectItem>
+                  <SelectItem value="multiple">Multi select</SelectItem>
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+
+          {question.type === 'select' && (
+            <div className="space-y-2">
+              {(question.options ?? []).map((option, optionIndex) => (
+                <div key={`${question.id}_${optionIndex}`} className="flex gap-2">
+                  <Input
+                    value={option}
+                    onChange={(e) =>
+                      updateSelectOption(question.id, optionIndex, e.target.value)
+                    }
+                    placeholder={`Option ${optionIndex + 1}`}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => removeSelectOption(question.id, optionIndex)}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => addSelectOption(question.id)}
+              >
+                <Plus className="size-4 mr-2" /> Add Option
+              </Button>
+            </div>
+          )}
+
+          {question.type === 'file' && (
+            <div className="space-y-1">
+              <Input
+                value={question.accept ?? ''}
+                onChange={(e) => updateQuestion(question.id, { accept: e.target.value })}
+                placeholder="Accepted file types (e.g. .pdf,.pptx,.docx)"
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave blank to allow all file types. Max 10 MB.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <Button variant="ghost" onClick={() => deleteQuestion(question.id)}>
+          <Trash2 className="size-4" />
+        </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
 
 export function FormBuilder({ onBack, onPublish, authState, onLogout }: FormBuilderProps) {
   const userId = authState.user?.id ?? null;
@@ -313,18 +474,22 @@ export function FormBuilder({ onBack, onPublish, authState, onLogout }: FormBuil
     setQuestions(questions.filter((question) => question.id !== id));
   };
 
-  const moveQuestion = (index: number, direction: 'up' | 'down') => {
-    const targetQuestion = questions[index];
-    if (targetQuestion?.locked) {
-      return;
-    }
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
-    const newQuestions = [...questions];
-    const targetIndex = direction === 'up' ? index - 1 : index + 1;
-    if (targetIndex < REQUIRED_QUESTIONS.length || targetIndex >= newQuestions.length) return;
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
 
-    [newQuestions[index], newQuestions[targetIndex]] = [newQuestions[targetIndex], newQuestions[index]];
-    setQuestions(newQuestions);
+    const oldIndex = questions.findIndex((q) => q.id === active.id);
+    const newIndex = questions.findIndex((q) => q.id === over.id);
+
+    // Prevent dropping into the locked zone
+    if (newIndex < REQUIRED_QUESTIONS.length) return;
+
+    setQuestions(arrayMove(questions, oldIndex, newIndex));
   };
 
   const addSelectOption = (questionId: string) => {
@@ -388,7 +553,7 @@ export function FormBuilder({ onBack, onPublish, authState, onLogout }: FormBuil
   return (
     <div className="min-h-screen bg-background">
       <div className="border-b border-border bg-background sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4">
+        <div className="max-w-7xl mx-auto px-4 md:px-6 py-4">
           <Input
             value={formName}
             onChange={(e) => setFormName(e.target.value)}
@@ -396,25 +561,27 @@ export function FormBuilder({ onBack, onPublish, authState, onLogout }: FormBuil
           />
 
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="w-full justify-start bg-[#FFD023]">
-              <TabsTrigger value="build" className="gap-2">
-                <Plus className="size-4" /> Build Form
-              </TabsTrigger>
-              <TabsTrigger value="thesis" className="gap-2">
-                <Sparkles className="size-4" /> VC Thesis
-              </TabsTrigger>
-              <TabsTrigger value="preview" className="gap-2">
-                <Eye className="size-4" /> Preview
-              </TabsTrigger>
-              <TabsTrigger value="embed" className="gap-2">
-                <Code className="size-4" /> Publish
-              </TabsTrigger>
-            </TabsList>
+            <div className="overflow-x-auto">
+              <TabsList className="w-auto justify-start bg-[#FFD023]">
+                <TabsTrigger value="build" className="gap-1 md:gap-2 text-xs md:text-sm">
+                  <Plus className="size-4" /> <span className="hidden sm:inline">Build</span> Form
+                </TabsTrigger>
+                <TabsTrigger value="thesis" className="gap-1 md:gap-2 text-xs md:text-sm">
+                  <Sparkles className="size-4" /> <span className="hidden sm:inline">VC</span> Thesis
+                </TabsTrigger>
+                <TabsTrigger value="preview" className="gap-1 md:gap-2 text-xs md:text-sm">
+                  <Eye className="size-4" /> Preview
+                </TabsTrigger>
+                <TabsTrigger value="embed" className="gap-1 md:gap-2 text-xs md:text-sm">
+                  <Code className="size-4" /> Publish
+                </TabsTrigger>
+              </TabsList>
+            </div>
           </Tabs>
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="max-w-7xl mx-auto px-4 md:px-6 py-8">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsContent value="build">
             <Card className="p-6 mb-6">
@@ -422,106 +589,27 @@ export function FormBuilder({ onBack, onPublish, authState, onLogout }: FormBuil
                 The first three questions are mandatory for all forms and power your results dashboard.
               </p>
 
-              {questions.map((question, index) => (
-                <Card key={question.id} className="p-4 mb-4 bg-muted/30">
-                  <div className="flex gap-3">
-                    <button onClick={() => moveQuestion(index, 'up')} disabled={Boolean(question.locked)}>
-                      <GripVertical className="size-4" />
-                    </button>
-
-                    <div className="flex-1 space-y-3">
-                      <Input
-                        value={question.label}
-                        disabled={Boolean(question.locked)}
-                        onChange={(e) => updateQuestion(question.id, { label: e.target.value })}
-                      />
-
-                      <Input
-                        value={question.placeholder ?? ''}
-                        placeholder="Placeholder"
-                        onChange={(e) => updateQuestion(question.id, { placeholder: e.target.value })}
-                      />
-
-                      <div className="grid md:grid-cols-2 gap-3">
-                        <Select
-                          value={question.type}
-                          onValueChange={(value) =>
-                            updateQuestion(question.id, {
-                              type: value as FormQuestion['type'],
-                            })
-                          }
-                          disabled={Boolean(question.locked)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="text">Text</SelectItem>
-                            <SelectItem value="textarea">Long Text</SelectItem>
-                            <SelectItem value="email">Email</SelectItem>
-                            <SelectItem value="url">URL</SelectItem>
-                            <SelectItem value="number">Number</SelectItem>
-                            <SelectItem value="select">Select</SelectItem>
-                          </SelectContent>
-                        </Select>
-
-                        {question.type === 'select' && (
-                          <Select
-                            value={question.allowMultiple ? 'multiple' : 'single'}
-                            onValueChange={(value) =>
-                              updateQuestion(question.id, {
-                                allowMultiple: value === 'multiple',
-                              })
-                            }
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="single">Single select</SelectItem>
-                              <SelectItem value="multiple">Multi select</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        )}
-                      </div>
-
-                      {question.type === 'select' && (
-                        <div className="space-y-2">
-                          {(question.options ?? []).map((option, optionIndex) => (
-                            <div key={`${question.id}_${optionIndex}`} className="flex gap-2">
-                              <Input
-                                value={option}
-                                onChange={(e) =>
-                                  updateSelectOption(question.id, optionIndex, e.target.value)
-                                }
-                                placeholder={`Option ${optionIndex + 1}`}
-                              />
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() => removeSelectOption(question.id, optionIndex)}
-                              >
-                                <Trash2 className="size-4" />
-                              </Button>
-                            </div>
-                          ))}
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => addSelectOption(question.id)}
-                          >
-                            <Plus className="size-4 mr-2" /> Add Option
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-
-                    <Button variant="ghost" onClick={() => deleteQuestion(question.id)}>
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </div>
-                </Card>
-              ))}
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                modifiers={[restrictToVerticalAxis]}
+                onDragEnd={handleDragEnd}
+              >
+                <SortableContext items={questions.map((q) => q.id)} strategy={verticalListSortingStrategy}>
+                  {questions.map((question, index) => (
+                    <SortableQuestionCard
+                      key={question.id}
+                      question={question}
+                      index={index}
+                      updateQuestion={updateQuestion}
+                      deleteQuestion={deleteQuestion}
+                      addSelectOption={addSelectOption}
+                      updateSelectOption={updateSelectOption}
+                      removeSelectOption={removeSelectOption}
+                    />
+                  ))}
+                </SortableContext>
+              </DndContext>
 
               <Button variant="outline" onClick={addQuestion} className="w-full">
                 <Plus className="size-4 mr-2" /> Add Question

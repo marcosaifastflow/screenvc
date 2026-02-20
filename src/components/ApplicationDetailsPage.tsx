@@ -52,12 +52,29 @@ interface Submission {
   submittedAt: string;
 }
 
+const isFileUploadUrl = (value: string) =>
+  value.includes('/form-uploads/');
+
 const renderValue = (value: string | string[] | undefined) => {
   if (Array.isArray(value)) {
     return value.length > 0 ? value.join(', ') : '-';
   }
 
   if (typeof value === 'string' && value.trim()) {
+    if (isFileUploadUrl(value)) {
+      const fileName = value.split('/').pop()?.replace(/^[^_]+_/, '') || 'Download file';
+      return (
+        <a
+          href={value}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-primary hover:underline"
+        >
+          <FileText className="size-4" />
+          {fileName}
+        </a>
+      );
+    }
     return value;
   }
 
@@ -446,19 +463,19 @@ export function ApplicationDetailsPage({
   return (
     <div className="min-h-screen bg-background">
       <div className="bg-muted/30 border-b border-border">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-5xl mx-auto px-4 md:px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h1 className="text-2xl">View Application</h1>
             <p className="text-sm text-muted-foreground">{formName}</p>
           </div>
-          <Button variant="outline" onClick={onBackToResults}>
+          <Button variant="outline" onClick={onBackToResults} className="self-start sm:self-auto">
             <ArrowLeft className="size-4 mr-2" />
             Back to Results
           </Button>
         </div>
       </div>
 
-      <div className="max-w-5xl mx-auto px-6 py-8">
+      <div className="max-w-5xl mx-auto px-4 md:px-6 py-6 md:py-8">
         {isLoading && (
           <Card className="p-8 text-center">
             <p className="text-muted-foreground">Loading application...</p>
@@ -541,7 +558,7 @@ export function ApplicationDetailsPage({
                 </CollapsibleTrigger>
                 <CollapsibleContent>
                   <div className="border-t border-primary/20">
-                    <div className="p-6 border-b border-primary/20 bg-primary/5 flex items-start justify-between gap-4">
+                    <div className="p-6 border-b border-primary/20 bg-primary/5 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                       <div>
                         <p className="text-xs uppercase tracking-wide text-primary font-medium mb-2">
                           Thesis Match Analysis
@@ -550,7 +567,7 @@ export function ApplicationDetailsPage({
                           Requirement-level fit based on the saved VC thesis criteria.
                         </p>
                       </div>
-                      <div className="text-right">
+                      <div className="sm:text-right">
                         <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Overall Fit</p>
                         <p className="text-3xl font-semibold text-primary">8.5/10</p>
                       </div>
