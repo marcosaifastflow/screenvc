@@ -18,16 +18,11 @@ import {
   getCalls,
   getEmailThreads,
   getPortfolio,
-  getMailboxStatus,
-  getMailboxConnectUrl,
-  disconnectMailbox,
   type EmailThread,
   type ScheduledCall,
   type PortfolioCompany,
-  type MailboxStatus,
 } from '../utils/api';
 import { getStoredFormId, setStoredFormId } from '../utils/formStorage';
-import { toast } from 'sonner';
 
 interface DashboardPageProps {
   userId?: string;
@@ -49,24 +44,6 @@ export function DashboardPage({ userId, accessToken, onNavigate }: DashboardPage
   const [companies, setCompanies] = useState<PortfolioCompany[]>([]);
   const [formName, setFormName] = useState<string | null>(null);
   const [formStatus, setFormStatus] = useState<string | null>(null);
-
-  const [mailboxStatus, setMailboxStatus] = useState<MailboxStatus | null>(null);
-  const [isLoadingEmail, setIsLoadingEmail] = useState(true);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isDisconnecting, setIsDisconnecting] = useState(false);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const mailboxParam = params.get('mailbox');
-    if (mailboxParam === 'connected') {
-      toast.success('Mailbox connected successfully.');
-      window.history.replaceState({}, '', window.location.pathname);
-    } else if (mailboxParam === 'error') {
-      const message = params.get('message') || 'Failed to connect mailbox.';
-      toast.error(message);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -132,47 +109,12 @@ export function DashboardPage({ userId, accessToken, onNavigate }: DashboardPage
         setCompanies(portfolioResult.companies ?? []);
       }
 
-      // Load mailbox status
-      setIsLoadingEmail(true);
-      const mbResult = await getMailboxStatus(accessToken);
-      if (active) {
-        setMailboxStatus(mbResult.status ?? null);
-        setIsLoadingEmail(false);
-      }
-
       if (active) setIsLoading(false);
     };
 
     loadAll();
     return () => { active = false; };
   }, [accessToken]);
-
-  const handleConnectMailbox = async (provider: 'google' | 'microsoft') => {
-    setIsConnecting(true);
-    const result = await getMailboxConnectUrl(provider, accessToken);
-    setIsConnecting(false);
-    if (!result.success || !result.url) {
-      toast.error(typeof result.error === 'string' ? result.error : 'Failed to create connect URL.');
-      return;
-    }
-    window.location.href = result.url;
-  };
-
-  const handleDisconnectMailbox = async () => {
-    setIsDisconnecting(true);
-    const result = await disconnectMailbox(accessToken);
-    setIsDisconnecting(false);
-    if (!result.success) {
-      toast.error(typeof result.error === 'string' ? result.error : 'Failed to disconnect mailbox.');
-      return;
-    }
-    setMailboxStatus(null);
-    toast.success('Mailbox disconnected.');
-  };
-
-  const isConnected = mailboxStatus?.connected ?? false;
-  const connectedEmail = mailboxStatus?.email ?? '';
-  const providerLabel = mailboxStatus?.provider === 'microsoft' ? 'Outlook' : mailboxStatus?.provider === 'google' ? 'Gmail' : '';
 
   const totalInvested = companies.reduce((sum, c) => sum + (c.dealSize ?? 0), 0);
   const activeCount = companies.filter((c) => c.status === 'active').length;
@@ -338,41 +280,6 @@ export function DashboardPage({ userId, accessToken, onNavigate }: DashboardPage
           </Button>
         </Card>
 
-        {/* Linked Email */}
-        <Card className="p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="size-9 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Mail className="size-5 text-primary" />
-            </div>
-            <h2 className="font-medium">Linked Sender Email</h2>
-          </div>
-          {isLoadingEmail ? (
-            <p className="text-sm text-muted-foreground">Loading email settings...</p>
-          ) : isConnected ? (
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Connected via {providerLabel}: <span className="text-foreground">{connectedEmail}</span>
-              </p>
-              <Button variant="outline" size="sm" onClick={handleDisconnectMailbox} disabled={isDisconnecting}>
-                {isDisconnecting ? 'Disconnecting...' : 'Disconnect'}
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                No email linked. Connect your Gmail or Outlook to send emails from your real address.
-              </p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => handleConnectMailbox('google')} disabled={isConnecting}>
-                  {isConnecting ? 'Connecting...' : 'Connect Gmail'}
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => handleConnectMailbox('microsoft')} disabled={isConnecting}>
-                  {isConnecting ? 'Connecting...' : 'Connect Outlook'}
-                </Button>
-              </div>
-            </div>
-          )}
-        </Card>
       </div>
     </div>
   );

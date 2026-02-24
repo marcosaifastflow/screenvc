@@ -14,8 +14,9 @@ import { DealIntelligencePage } from './components/DealIntelligencePage';
 import { PortfolioPage } from './components/PortfolioPage';
 import { AuthenticatedLayout } from './components/AuthenticatedLayout';
 import { Toaster } from './components/ui/sonner';
-import { getForm } from './utils/api';
+import { getForm, getMailboxStatus, getMailboxConnectUrl, disconnectMailbox, type MailboxStatus } from './utils/api';
 import { supabase } from './utils/supabase/client';
+import { toast } from 'sonner';
 import type { Session, User } from '@supabase/supabase-js';
 
 interface PublishedFormData {
@@ -74,6 +75,11 @@ export default function App() {
   });
   const [authReady, setAuthReady] = useState(false);
 
+  const [mailboxStatus, setMailboxStatus] = useState<MailboxStatus | null>(null);
+  const [isMailboxLoading, setIsMailboxLoading] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+
   // --------------------------------
   // Restore Supabase session
   // --------------------------------
@@ -127,6 +133,67 @@ export default function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  // --------------------------------
+  // Load mailbox status
+  // --------------------------------
+  useEffect(() => {
+    if (!authState.isAuthenticated || !authState.accessToken) return;
+    let active = true;
+
+    const load = async () => {
+      setIsMailboxLoading(true);
+      const result = await getMailboxStatus(authState.accessToken);
+      if (active) {
+        setMailboxStatus(result.status ?? null);
+        setIsMailboxLoading(false);
+      }
+    };
+
+    // Handle OAuth callback params
+    const params = new URLSearchParams(window.location.search);
+    const mailboxParam = params.get('mailbox');
+    if (mailboxParam === 'connected') {
+      toast.success('Mailbox connected successfully.');
+      params.delete('mailbox');
+      params.delete('message');
+      const clean = params.toString() ? `?${params.toString()}` : window.location.pathname;
+      window.history.replaceState({}, '', clean);
+    } else if (mailboxParam === 'error') {
+      const message = params.get('message') || 'Failed to connect mailbox.';
+      toast.error(message);
+      params.delete('mailbox');
+      params.delete('message');
+      const clean = params.toString() ? `?${params.toString()}` : window.location.pathname;
+      window.history.replaceState({}, '', clean);
+    }
+
+    load();
+    return () => { active = false; };
+  }, [authState.isAuthenticated, authState.accessToken]);
+
+  const handleConnectMailbox = async (provider: 'google' | 'microsoft') => {
+    setIsConnecting(true);
+    const result = await getMailboxConnectUrl(provider, authState.accessToken);
+    setIsConnecting(false);
+    if (!result.success || !result.url) {
+      toast.error(typeof result.error === 'string' ? result.error : 'Failed to create connect URL.');
+      return;
+    }
+    window.location.href = result.url;
+  };
+
+  const handleDisconnectMailbox = async () => {
+    setIsDisconnecting(true);
+    const result = await disconnectMailbox(authState.accessToken);
+    setIsDisconnecting(false);
+    if (!result.success) {
+      toast.error(typeof result.error === 'string' ? result.error : 'Failed to disconnect mailbox.');
+      return;
+    }
+    setMailboxStatus(null);
+    toast.success('Mailbox disconnected.');
+  };
 
   // --------------------------------
   // QUERY-BASED ROUTER (FIGMA SAFE)
@@ -416,7 +483,7 @@ export default function App() {
   // Render
   // --------------------------------
   return (
-    <div className="min-h-screen bg-background">
+    <div className={`bg-background ${AUTHENTICATED_VIEWS.has(view) ? 'h-screen overflow-hidden' : 'min-h-screen'}`}>
       <Toaster />
 
       {view === 'landing' && (
@@ -429,6 +496,12 @@ export default function App() {
           userEmail={authState.user?.email}
           onNavigate={handleNavigate}
           onLogout={handleLogout}
+          mailboxStatus={mailboxStatus}
+          isMailboxLoading={isMailboxLoading}
+          isConnecting={isConnecting}
+          isDisconnecting={isDisconnecting}
+          onConnectMailbox={handleConnectMailbox}
+          onDisconnectMailbox={handleDisconnectMailbox}
         >
           {renderAuthenticatedContent()}
         </AuthenticatedLayout>

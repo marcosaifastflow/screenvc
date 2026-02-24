@@ -32,6 +32,12 @@ interface EmailInboxPageProps {
   onOpenApplication: (submissionId: string) => void;
 }
 
+function stripHtml(html: string | undefined | null): string {
+  if (!html) return '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
 function getInitials(name: string) {
   return name
     .split(/\s+/)
@@ -264,12 +270,13 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
               </Button>
             </div>
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
               <Input
                 placeholder="Search conversations..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 h-9 text-sm"
+                className="h-9 text-sm"
+                style={{ paddingLeft: '2.5rem' }}
               />
             </div>
           </div>
@@ -309,7 +316,7 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
                           {thread.latestSubject}
                         </p>
                         <p className="text-xs text-muted-foreground/70 truncate mt-0.5">
-                          {thread.latestPreview}
+                          {stripHtml(thread.latestPreview)}
                         </p>
                       </div>
                     </div>
@@ -332,10 +339,10 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
 
   // Selected thread: show full email detail view
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden border rounded-xl bg-background shadow-sm mx-4 my-4">
+    <div className="h-full flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden border rounded-xl bg-background shadow-sm mx-4 my-4">
         {/* Thread header with back button */}
-        <div className="px-6 py-4 border-b flex items-center justify-between gap-4">
+        <div className="shrink-0 px-6 py-4 border-b flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <Button
               variant="ghost"
@@ -369,7 +376,7 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
         </div>
 
         {/* Messages */}
-        <ScrollArea className="flex-1 px-6">
+        <div className="flex-1 min-h-0 overflow-auto px-6">
           {isMessagesLoading ? (
             <div className="flex items-center justify-center py-16">
               <div className="flex flex-col items-center gap-3">
@@ -383,15 +390,16 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
               <p className="text-sm text-muted-foreground">No messages in this thread yet.</p>
             </div>
           ) : (
-            <div className="py-4 space-y-4">
+            <div className="py-4 space-y-6">
               {messages.map((message) => {
                 const isOutbound = message.direction === 'outbound';
+                const isHtml = /<[a-z][\s\S]*>/i.test(message.body);
                 return (
                   <div
                     key={message.id}
                     className={`flex ${isOutbound ? 'justify-end' : 'justify-start'}`}
                   >
-                    <div className={`max-w-[75%] ${isOutbound ? 'order-1' : ''}`}>
+                    <div className={`${isHtml ? 'w-full' : 'max-w-[75%]'} ${isOutbound ? 'order-1' : ''}`}>
                       {/* Sender label */}
                       <div
                         className={`flex items-center gap-2 mb-1 ${isOutbound ? 'justify-end' : 'justify-start'}`}
@@ -421,13 +429,37 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
                             {message.subject}
                           </p>
                         )}
-                        <p
-                          className={`text-sm whitespace-pre-wrap break-words leading-relaxed ${
-                            isOutbound ? 'text-primary-foreground/85' : 'text-foreground/80'
-                          }`}
-                        >
-                          {message.body}
-                        </p>
+                        {isHtml ? (
+                          <iframe
+                            srcDoc={message.body}
+                            sandbox="allow-same-origin"
+                            className="w-full border-0"
+                            style={{ colorScheme: 'light', height: '0px', overflow: 'hidden' }}
+                            onLoad={(e) => {
+                              const iframe = e.target as HTMLIFrameElement;
+                              try {
+                                const doc = iframe.contentDocument;
+                                if (doc?.body) {
+                                  // Reset and measure
+                                  doc.body.style.margin = '0';
+                                  doc.body.style.overflow = 'hidden';
+                                  iframe.style.height = doc.documentElement.scrollHeight + 'px';
+                                }
+                              } catch {
+                                // Fallback if access blocked
+                                iframe.style.height = '400px';
+                              }
+                            }}
+                          />
+                        ) : (
+                          <p
+                            className={`text-sm whitespace-pre-wrap break-words leading-relaxed ${
+                              isOutbound ? 'text-primary-foreground/85' : 'text-foreground/80'
+                            }`}
+                          >
+                            {message.body}
+                          </p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -436,10 +468,10 @@ export function EmailInboxPage({ accessToken, onBackToHub, onOpenApplication }: 
               <div ref={messagesEndRef} />
             </div>
           )}
-        </ScrollArea>
+        </div>
 
         {/* Reply composer */}
-        <div className="border-t bg-muted/20 px-6 py-4 space-y-3">
+        <div className="border-t bg-muted/20 px-6 py-4 space-y-3 shrink-0">
           <div className="flex items-center gap-2">
             <Input
               value={replySubject}

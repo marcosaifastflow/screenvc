@@ -1610,7 +1610,9 @@ const syncMailboxMessages = async (
     const fromList = Array.isArray(message.from) ? (message.from as Record<string, unknown>[]) : [];
     const toList = Array.isArray(message.to) ? (message.to as Record<string, unknown>[]) : [];
     const fromEmail = typeof fromList[0]?.email === 'string' ? String(fromList[0].email) : '';
+    const fromName = typeof fromList[0]?.name === 'string' && fromList[0].name.trim() ? String(fromList[0].name).trim() : '';
     const toEmail = typeof toList[0]?.email === 'string' ? String(toList[0].email) : '';
+    const toName = typeof toList[0]?.name === 'string' && toList[0].name.trim() ? String(toList[0].name).trim() : '';
     const inbound = fromEmail.toLowerCase() !== connection.mailbox_email.toLowerCase();
     const providerThreadId =
       typeof message.thread_id === 'string'
@@ -1632,7 +1634,7 @@ const syncMailboxMessages = async (
       thread_id: threadId,
       form_external_id: null,
       submission_external_id: null,
-      company_name: 'Startup',
+      company_name: inbound ? (fromName || fromEmail.split('@')[0] || 'Unknown') : (toName || toEmail.split('@')[0] || 'Unknown'),
       startup_email: inbound ? fromEmail : toEmail,
       vc_email: inbound ? toEmail || connection.mailbox_email : fromEmail || connection.mailbox_email,
       direction: inbound ? 'inbound' : 'outbound',
