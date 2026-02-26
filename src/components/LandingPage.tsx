@@ -41,6 +41,19 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
             <Button size="lg" onClick={onGetStarted} className="px-8 bg-black text-white font-semibold hover:bg-black hover:text-white hover:scale-105 transition-transform">Create Your Form</Button>
           </div>
         </div>
+
+        {/* Demo Video */}
+        <div className="max-w-5xl mx-auto px-6 mt-12 md:mt-16">
+          <div className="rounded-2xl overflow-hidden shadow-2xl border border-black/10">
+            <video
+              className="w-full"
+              controls
+              playsInline
+            >
+              <source src="/demo-video.mp4" type="video/mp4" />
+            </video>
+          </div>
+        </div>
       </section>
 
       {/* Problem Statement */}
