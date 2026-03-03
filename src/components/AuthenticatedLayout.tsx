@@ -53,7 +53,7 @@ export function AuthenticatedLayout({
             {currentView === 'builder' ? 'Form Builder' : currentView === 'results' ? 'Form Results' : currentView === 'inbox' ? 'Email Inbox' : currentView === 'portfolio' ? 'My Portfolio' : currentView}
           </span>
         </header>
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
           {children}
         </div>
       </SidebarInset>
